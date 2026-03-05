@@ -1,0 +1,210 @@
+/* Fanyi2 前端语言切换器样式 */
+
+/* 语言切换器 - 基础 */
+.fanyi2-language-switcher {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    z-index: 99999;
+}
+
+/* 位置定位（浮动模式） */
+.fanyi2-pos-bottom-right { position: fixed; bottom: 20px; right: 20px; }
+.fanyi2-pos-bottom-left  { position: fixed; bottom: 20px; left: 20px; }
+.fanyi2-pos-top-right    { position: fixed; top: 20px; right: 20px; }
+.fanyi2-pos-top-left     { position: fixed; top: 20px; left: 20px; }
+.fanyi2-pos-inline        { position: relative; display: inline-block; }
+
+.fanyi2-switcher-current {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 16px;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 25px;
+    cursor: pointer;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+    transition: all 0.2s ease;
+    font-size: 14px;
+    user-select: none;
+}
+
+.fanyi2-switcher-current:hover {
+    box-shadow: 0 4px 20px rgba(0,0,0,0.18);
+    border-color: #aaa;
+}
+
+.fanyi2-flag {
+    font-size: 18px;
+    line-height: 1;
+}
+
+.fanyi2-lang-name {
+    font-weight: 500;
+}
+
+.fanyi2-arrow {
+    font-size: 10px;
+    color: #999;
+    transition: transform 0.2s;
+}
+
+.fanyi2-switcher.open .fanyi2-arrow {
+    transform: rotate(180deg);
+}
+
+.fanyi2-switcher-dropdown {
+    display: none;
+    position: absolute;
+    bottom: 100%;
+    right: 0;
+    margin-bottom: 8px;
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 12px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.15);
+    overflow: hidden;
+    min-width: 160px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.fanyi2-switcher.open .fanyi2-switcher-dropdown {
+    display: block;
+    animation: fanyi2-fade-up 0.2s ease;
+}
+
+@keyframes fanyi2-fade-up {
+    from { opacity: 0; transform: translateY(8px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.fanyi2-lang-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 16px;
+    text-decoration: none;
+    color: #333;
+    font-size: 14px;
+    transition: background 0.15s;
+}
+
+.fanyi2-lang-option:hover {
+    background: #f0f6fc;
+    color: #2271b1;
+}
+
+.fanyi2-lang-option.active {
+    background: #e8f4fd;
+    color: #2271b1;
+    font-weight: 600;
+}
+
+/* 顶部位置时下拉向下 */
+.fanyi2-pos-top-right .fanyi2-switcher-dropdown,
+.fanyi2-pos-top-left .fanyi2-switcher-dropdown {
+    bottom: auto;
+    top: 100%;
+    margin-bottom: 0;
+    margin-top: 8px;
+}
+
+/* ===== 国旗样式 ===== */
+.fanyi2-switcher-flags {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    padding: 8px 12px;
+    background: #fff;
+    border-radius: 25px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.12);
+}
+
+.fanyi2-flag-option {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    text-decoration: none;
+    font-size: 20px;
+    transition: all 0.2s;
+    background: transparent;
+}
+
+.fanyi2-flag-option:hover {
+    background: #f0f6fc;
+    transform: scale(1.15);
+}
+
+.fanyi2-flag-option.active {
+    background: #e8f4fd;
+    box-shadow: 0 0 0 2px #2271b1;
+}
+
+/* ===== 简约下拉框样式 ===== */
+.fanyi2-switcher-select {
+    padding: 8px 32px 8px 12px;
+    font-size: 14px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background: #fff;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.1);
+    cursor: pointer;
+    appearance: auto;
+    min-width: 140px;
+}
+
+/* 管理员翻译按钮 */
+#fanyi2-edit-trigger {
+    position: fixed;
+    bottom: 80px;
+    right: 20px;
+    z-index: 99998;
+}
+
+.fanyi2-edit-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 16px;
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: #fff !important;
+    text-decoration: none !important;
+    border-radius: 25px;
+    font-size: 13px;
+    font-weight: 500;
+    box-shadow: 0 2px 12px rgba(102,126,234,0.4);
+    transition: all 0.2s;
+}
+
+.fanyi2-edit-btn:hover {
+    box-shadow: 0 4px 20px rgba(102,126,234,0.6);
+    transform: translateY(-1px);
+}
+
+/* ========= RTL 支持 ========= */
+[dir="rtl"] .fanyi2-switcher-dropdown {
+    left: 0;
+    right: auto;
+}
+
+[dir="rtl"] #fanyi2-edit-trigger {
+    right: auto;
+    left: 20px;
+}
+
+[dir="rtl"] .fanyi2-lang-option .fanyi2-lang-flag {
+    margin-right: 0;
+    margin-left: 8px;
+}
+
+body.fanyi2-rtl {
+    direction: rtl;
+    text-align: right;
+}
+
+body.fanyi2-rtl .fanyi2-switcher {
+    direction: ltr;
+}
