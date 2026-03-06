@@ -10,153 +10,156 @@ if (!defined('ABSPATH')) {
 class Fanyi2_Batch {
 
     /**
-     * 扫描站点页面抓取所有文本
+     * 扫描站点抓取所有文本（直接查询数据库，不依赖 HTTP 请求）
      */
     public static function scan_site_pages($urls = array()) {
-        if (empty($urls)) {
-            $urls = self::get_site_urls();
-        }
-
         $total_strings = 0;
 
-        foreach ($urls as $url) {
-            $strings = self::scan_page($url);
-            $total_strings += count($strings);
+        // 1. 直接从数据库扫描所有内容（可靠，不依赖 HTTP loopback）
+        $total_strings += self::scan_database_content();
+
+        // 2. 注册 WooCommerce 通用界面字符串
+        if (class_exists('WooCommerce')) {
+            $total_strings += self::register_woocommerce_strings();
         }
 
         return $total_strings;
     }
 
     /**
-     * 获取站点所有公开URL
+     * 从数据库直接扫描站点内容
      */
-    public static function get_site_urls() {
-        $urls = array(home_url('/'));
+    public static function scan_database_content() {
+        $count = 0;
 
-        // 获取所有公开页面
-        $pages = get_pages(array('post_status' => 'publish'));
-        foreach ($pages as $page) {
-            $urls[] = get_permalink($page->ID);
+        // ——— 站点标题和描述 ———
+        $count += self::register_single_string(get_bloginfo('name'), 'site_title', home_url('/'), 'general');
+        $count += self::register_single_string(get_bloginfo('description'), 'site_description', home_url('/'), 'general');
+
+        // ——— 所有公开的 post / page / product ———
+        $post_types = array('post', 'page');
+        if (post_type_exists('product')) {
+            $post_types[] = 'product';
         }
 
-        // 获取所有公开文章（最近50篇）
-        $posts = get_posts(array(
+        $all_posts = get_posts(array(
+            'post_type'      => $post_types,
             'post_status'    => 'publish',
-            'posts_per_page' => 50,
-            'orderby'        => 'date',
-            'order'          => 'DESC',
+            'posts_per_page' => -1,
         ));
-        foreach ($posts as $post) {
-            $urls[] = get_permalink($post->ID);
+
+        foreach ($all_posts as $post) {
+            $url = get_permalink($post->ID);
+
+            // 标题
+            $count += self::register_single_string($post->post_title, 'post_title', $url);
+
+            // 摘要
+            if (!empty($post->post_excerpt)) {
+                $count += self::register_single_string($post->post_excerpt, 'excerpt', $url);
+            }
+
+            // 内容文本（按段拆分）
+            $content = $post->post_content;
+            $content = strip_shortcodes($content);
+            $content = preg_replace('/<!--.*?-->/s', '', $content);  // 移除块编辑器注释
+            $content = wp_strip_all_tags($content);
+
+            $lines = preg_split('/[\r\n]+/', $content);
+            foreach ($lines as $line) {
+                $line = trim($line);
+                if (!empty($line) && mb_strlen($line) >= 2 && mb_strlen($line) <= 1000 && preg_match('/[\p{L}]/u', $line)) {
+                    $count += self::register_single_string($line, 'content', $url);
+                }
+            }
         }
 
-        // WooCommerce产品
+        // ——— 导航菜单项 ———
+        $menus = wp_get_nav_menus();
+        if ($menus) {
+            foreach ($menus as $menu) {
+                $items = wp_get_nav_menu_items($menu->term_id);
+                if ($items) {
+                    foreach ($items as $item) {
+                        if (!empty($item->title)) {
+                            $count += self::register_single_string($item->title, 'menu_item', '', 'general');
+                        }
+                    }
+                }
+            }
+        }
+
+        // ——— 文章分类 ———
+        $categories = get_categories(array('hide_empty' => false));
+        if ($categories && !is_wp_error($categories)) {
+            foreach ($categories as $cat) {
+                $count += self::register_single_string($cat->name, 'category', get_category_link($cat->term_id));
+                if (!empty($cat->description)) {
+                    $count += self::register_single_string($cat->description, 'category_desc', get_category_link($cat->term_id));
+                }
+            }
+        }
+
+        // ——— 文章标签 ———
+        $tags = get_tags(array('hide_empty' => false));
+        if ($tags && !is_wp_error($tags)) {
+            foreach ($tags as $tag) {
+                $count += self::register_single_string($tag->name, 'tag', get_tag_link($tag->term_id));
+            }
+        }
+
+        // ——— WooCommerce 分类 / 标签 / 属性 ———
         if (class_exists('WooCommerce')) {
-            $products = get_posts(array(
-                'post_type'      => 'product',
-                'post_status'    => 'publish',
-                'posts_per_page' => 100,
-            ));
-            foreach ($products as $product) {
-                $urls[] = get_permalink($product->ID);
+            $product_cats = get_terms(array('taxonomy' => 'product_cat', 'hide_empty' => false));
+            if ($product_cats && !is_wp_error($product_cats)) {
+                foreach ($product_cats as $cat) {
+                    $count += self::register_single_string($cat->name, 'product_cat', '', 'woocommerce');
+                    if (!empty($cat->description)) {
+                        $count += self::register_single_string($cat->description, 'product_cat_desc', '', 'woocommerce');
+                    }
+                }
             }
 
-            // WooCommerce特殊页面
-            $wc_pages = array('shop', 'cart', 'checkout', 'myaccount');
-            foreach ($wc_pages as $wc_page) {
-                $page_id = wc_get_page_id($wc_page);
-                if ($page_id > 0) {
-                    $urls[] = get_permalink($page_id);
+            $product_tags = get_terms(array('taxonomy' => 'product_tag', 'hide_empty' => false));
+            if ($product_tags && !is_wp_error($product_tags)) {
+                foreach ($product_tags as $tag) {
+                    $count += self::register_single_string($tag->name, 'product_tag', '', 'woocommerce');
+                }
+            }
+
+            if (function_exists('wc_get_attribute_taxonomies')) {
+                $attributes = wc_get_attribute_taxonomies();
+                if ($attributes) {
+                    foreach ($attributes as $attr) {
+                        $count += self::register_single_string($attr->attribute_label, 'product_attr', '', 'woocommerce');
+                        $terms = get_terms(array('taxonomy' => 'pa_' . $attr->attribute_name, 'hide_empty' => false));
+                        if ($terms && !is_wp_error($terms)) {
+                            foreach ($terms as $term) {
+                                $count += self::register_single_string($term->name, 'attr_value', '', 'woocommerce');
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // 分类和标签页面
-        $categories = get_categories(array('hide_empty' => true));
-        foreach ($categories as $cat) {
-            $urls[] = get_category_link($cat->term_id);
-        }
-
-        return array_unique($urls);
+        return $count;
     }
 
     /**
-     * 扫描单个页面
+     * 注册单个字符串到数据库
      */
-    public static function scan_page($url) {
-        $response = wp_remote_get($url, array(
-            'timeout'   => 30,
-            'cookies'   => array(), // 使用默认语言
-            'sslverify' => false,
+    private static function register_single_string($text, $element_type = 'text', $page_url = '', $domain = 'general') {
+        $text = trim($text);
+        if (empty($text) || mb_strlen($text) < 2 || !preg_match('/[\p{L}]/u', $text)) {
+            return 0;
+        }
+        $obj = Fanyi2_Database::get_or_create_string($text, array(
+            'domain'       => $domain,
+            'element_type' => $element_type,
+            'page_url'     => $page_url,
         ));
-
-        if (is_wp_error($response)) {
-            return array();
-        }
-
-        $html = wp_remote_retrieve_body($response);
-        return self::extract_strings_from_html($html, $url);
-    }
-
-    /**
-     * 从HTML中提取字符串
-     */
-    public static function extract_strings_from_html($html, $page_url = '') {
-        $strings = array();
-
-        // 提取标签间文本
-        preg_match_all('/>([^<]+)</', $html, $matches);
-        if (!empty($matches[1])) {
-            foreach ($matches[1] as $text) {
-                $text = trim($text);
-                if (!empty($text) && mb_strlen($text) >= 2 && preg_match('/[\p{L}]/u', $text)) {
-                    // 排除脚本和样式中的内容
-                    $string_obj = Fanyi2_Database::get_or_create_string($text, array(
-                        'page_url'     => $page_url,
-                        'element_type' => 'text',
-                    ));
-                    if ($string_obj) {
-                        $strings[] = $string_obj;
-                    }
-                }
-            }
-        }
-
-        // 提取属性文本
-        preg_match_all('/(alt|title|placeholder)=["\']([^"\']+)["\']/', $html, $attr_matches);
-        if (!empty($attr_matches[2])) {
-            foreach ($attr_matches[2] as $i => $text) {
-                $text = trim($text);
-                if (!empty($text) && mb_strlen($text) >= 2 && preg_match('/[\p{L}]/u', $text)) {
-                    $string_obj = Fanyi2_Database::get_or_create_string($text, array(
-                        'page_url'     => $page_url,
-                        'element_type' => $attr_matches[1][$i],
-                    ));
-                    if ($string_obj) {
-                        $strings[] = $string_obj;
-                    }
-                }
-            }
-        }
-
-        // 提取meta内容
-        preg_match_all('/<meta[^>]*content=["\']([^"\']+)["\'][^>]*>/i', $html, $meta_matches);
-        if (!empty($meta_matches[1])) {
-            foreach ($meta_matches[1] as $text) {
-                $text = trim($text);
-                if (!empty($text) && mb_strlen($text) >= 5 && preg_match('/[\p{L}]/u', $text)) {
-                    $string_obj = Fanyi2_Database::get_or_create_string($text, array(
-                        'page_url'     => $page_url,
-                        'element_type' => 'meta',
-                    ));
-                    if ($string_obj) {
-                        $strings[] = $string_obj;
-                    }
-                }
-            }
-        }
-
-        return $strings;
+        return $obj ? 1 : 0;
     }
 
     /**
@@ -203,5 +206,90 @@ class Fanyi2_Batch {
             'translated' => $total_translated,
             'errors'     => $errors,
         );
+    }
+
+    /**
+     * 注册 WooCommerce 通用界面字符串
+     * 这些是购物车、结账、账户页面等常见文本
+     */
+    public static function register_woocommerce_strings() {
+        $wc_strings = array(
+            // 购物车
+            'Add to cart', 'View cart', 'Cart', 'Cart totals',
+            'Update cart', 'Subtotal', 'Total', 'Coupon code',
+            'Apply coupon', 'Remove this item', 'Cart updated.',
+            'Proceed to checkout', 'Your cart is currently empty.',
+            'Return to shop', 'Coupon', 'Remove', 'Quantity',
+            'Price', 'Product', 'Shipping', 'Free shipping',
+            'Flat rate', 'Calculate shipping', 'Update totals',
+
+            // 结账
+            'Checkout', 'Billing details', 'Shipping details',
+            'Your order', 'Place order', 'Order notes',
+            'First name', 'Last name', 'Company name',
+            'Country / Region', 'Street address', 'Apartment, suite, unit, etc.',
+            'Town / City', 'State / County', 'Postcode / ZIP',
+            'Phone', 'Email address', 'Create an account?',
+            'Notes about your order', 'Ship to a different address?',
+            'Payment method', 'Order summary',
+
+            // 账户
+            'My account', 'Dashboard', 'Orders', 'Downloads',
+            'Addresses', 'Account details', 'Logout', 'Log out',
+            'Edit your password and account details.',
+            'Billing address', 'Shipping address', 'Edit',
+            'No order has been made yet.', 'No downloads available yet.',
+            'The following addresses will be used on the checkout page by default.',
+
+            // 产品
+            'Description', 'Additional information', 'Reviews',
+            'Related products', 'Sale!', 'Out of stock', 'In stock',
+            'SKU', 'Category', 'Categories', 'Tag', 'Tags',
+            'Add to wishlist', 'Compare', 'Quick view',
+            'Read more', 'Select options',
+
+            // 搜索和筛选
+            'Search', 'Search products…', 'Search results for',
+            'No products were found matching your selection.',
+            'Sort by', 'Default sorting', 'Sort by popularity',
+            'Sort by average rating', 'Sort by latest',
+            'Sort by price: low to high', 'Sort by price: high to low',
+            'Show', 'Filter', 'Price',
+
+            // 登录注册
+            'Login', 'Register', 'Username or email address',
+            'Password', 'Remember me', 'Log in', 'Lost your password?',
+            'Email', 'Username',
+
+            // 订单
+            'Order', 'Date', 'Status', 'Actions', 'View',
+            'Thank you. Your order has been received.',
+            'Order number', 'Order details', 'Customer details',
+            'Processing', 'Completed', 'On hold', 'Cancelled', 'Refunded', 'Failed', 'Pending payment',
+
+            // 商店
+            'Shop', 'Home', 'Products',
+            'Showing all results', 'Showing the single result',
+
+            // 通用
+            'Save changes', 'Close', 'Continue shopping',
+            'Apply', 'Cancel', 'Submit', 'Update', 'Delete',
+            'Yes', 'No', 'OK', 'Error', 'Success',
+            'Loading...', 'Please wait...', 'Required field',
+        );
+
+        $count = 0;
+        foreach ($wc_strings as $str) {
+            $obj = Fanyi2_Database::get_or_create_string($str, array(
+                'domain'       => 'woocommerce',
+                'element_type' => 'gettext',
+                'page_url'     => '',
+            ));
+            if ($obj) {
+                $count++;
+            }
+        }
+
+        return $count;
     }
 }

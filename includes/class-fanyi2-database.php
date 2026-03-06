@@ -240,12 +240,14 @@ class Fanyi2_Database {
         global $wpdb;
 
         $defaults = array(
-            'page'     => 1,
-            'per_page' => 20,
-            'search'   => '',
-            'language' => '',
-            'status'   => '',
-            'domain'   => '',
+            'page'               => 1,
+            'per_page'           => 20,
+            'search'             => '',
+            'language'           => '',
+            'status'             => '',
+            'domain'             => '',
+            'translation_status' => '', // translated, untranslated, partial
+            'filter_language'    => '', // specific language code to check
         );
         $args = wp_parse_args($args, $defaults);
 
@@ -254,6 +256,7 @@ class Fanyi2_Database {
 
         $where = array("1=1");
         $params = array();
+        $having = array();
 
         if (!empty($args['search'])) {
             $where[] = "s.original_string LIKE %s";
@@ -266,6 +269,42 @@ class Fanyi2_Database {
         if (!empty($args['status'])) {
             $where[] = "s.status = %s";
             $params[] = $args['status'];
+        }
+
+        // 翻译状态筛选
+        $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $target_langs = array_filter($enabled_languages, function($l) use ($default_lang) {
+            return $l !== $default_lang;
+        });
+        $target_lang_count = count($target_langs);
+
+        if (!empty($args['translation_status']) || !empty($args['filter_language'])) {
+            // 需要使用子查询来计算翻译状态
+            if (!empty($args['filter_language'])) {
+                $filter_lang = $args['filter_language'];
+                if ($args['translation_status'] === 'translated') {
+                    $where[] = "EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
+                    $params[] = $filter_lang;
+                } elseif ($args['translation_status'] === 'untranslated') {
+                    $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
+                    $params[] = $filter_lang;
+                }
+            } else {
+                if ($args['translation_status'] === 'translated' && $target_lang_count > 0) {
+                    // 所有目标语言都有翻译
+                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') >= %d";
+                    $params[] = $target_lang_count;
+                } elseif ($args['translation_status'] === 'untranslated') {
+                    // 没有任何翻译
+                    $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published')";
+                } elseif ($args['translation_status'] === 'partial' && $target_lang_count > 0) {
+                    // 有一些翻译，但不完整
+                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') > 0";
+                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') < %d";
+                    $params[] = $target_lang_count;
+                }
+            }
         }
 
         $where_clause = implode(' AND ', $where);
@@ -340,6 +379,18 @@ class Fanyi2_Database {
 
         $wpdb->delete($table_trans, array('string_id' => $string_id), array('%d'));
         $wpdb->delete($table_strings, array('id' => $string_id), array('%d'));
+
+        return true;
+    }
+
+    /**
+     * 仅删除字符串的所有翻译（保留字符串本身）
+     */
+    public static function delete_translations_for_string($string_id) {
+        global $wpdb;
+
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $wpdb->delete($table_trans, array('string_id' => $string_id), array('%d'));
 
         return true;
     }

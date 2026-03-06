@@ -56,7 +56,7 @@
         },
 
         switchLanguage: function(lang) {
-            // AJAX切换语言
+            // AJAX切换语言（设置cookie）
             $.ajax({
                 url: fanyi2_vars.ajax_url,
                 type: 'POST',
@@ -67,25 +67,66 @@
                 },
                 success: function(response) {
                     if (response.success) {
-                        // 更新URL并重新加载
-                        var url = new URL(window.location.href);
-                        if (fanyi2_vars.url_mode === 'parameter') {
-                            if (lang === fanyi2_vars.default_language) {
-                                url.searchParams.delete('lang');
-                            } else {
-                                url.searchParams.set('lang', lang);
-                            }
-                        }
-                        window.location.href = url.toString();
+                        Fanyi2Frontend.redirectToLanguage(lang);
                     }
                 },
                 error: function() {
-                    // 降级：直接跳URL
-                    var url = new URL(window.location.href);
-                    url.searchParams.set('lang', lang);
-                    window.location.href = url.toString();
+                    // 降级：直接跳转
+                    Fanyi2Frontend.redirectToLanguage(lang);
                 }
             });
+        },
+
+        /**
+         * 跳转到指定语言的URL
+         */
+        redirectToLanguage: function(lang) {
+            var urlMode = fanyi2_vars.url_mode || 'parameter';
+            var defaultLang = fanyi2_vars.default_language || 'zh';
+            var url = new URL(window.location.href);
+
+            if (urlMode === 'subdirectory') {
+                // 子目录模式: /en/page -> /fr/page 或 /page
+                var pathname = url.pathname;
+                var homeUrl = fanyi2_vars.home_url || '';
+                var homePath = '';
+                try {
+                    homePath = new URL(homeUrl).pathname.replace(/\/$/, '');
+                } catch(e) {}
+
+                var relativePath = pathname;
+                if (homePath) {
+                    relativePath = pathname.substring(homePath.length);
+                }
+                relativePath = relativePath.replace(/^\//, '');
+
+                // 移除当前语言前缀
+                var enabledLangs = fanyi2_vars.enabled_languages || [];
+                var segments = relativePath.split('/');
+                if (segments.length > 0 && enabledLangs.indexOf(segments[0]) !== -1) {
+                    segments.shift();
+                }
+                var cleanPath = segments.join('/');
+
+                // 添加新语言前缀
+                if (lang === defaultLang) {
+                    url.pathname = homePath + '/' + cleanPath;
+                } else {
+                    url.pathname = homePath + '/' + lang + '/' + cleanPath;
+                }
+
+                // 移除 ?lang 参数（如果存在）
+                url.searchParams.delete('lang');
+            } else {
+                // 参数模式
+                if (lang === defaultLang) {
+                    url.searchParams.delete('lang');
+                } else {
+                    url.searchParams.set('lang', lang);
+                }
+            }
+
+            window.location.href = url.toString();
         }
     };
 

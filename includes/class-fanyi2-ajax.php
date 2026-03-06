@@ -30,6 +30,18 @@ class Fanyi2_Ajax {
         // 批量预翻译
         add_action('wp_ajax_fanyi2_batch_pretranslate', array(__CLASS__, 'batch_pretranslate'));
 
+        // 扫描站点
+        add_action('wp_ajax_fanyi2_scan_site', array(__CLASS__, 'scan_site'));
+
+        // 获取字符串详情
+        add_action('wp_ajax_fanyi2_get_string_detail', array(__CLASS__, 'get_string_detail'));
+
+        // 更新翻译（编辑弹窗保存）
+        add_action('wp_ajax_fanyi2_update_translation', array(__CLASS__, 'update_translation'));
+
+        // 清除翻译（仅删除翻译，保留字符串）
+        add_action('wp_ajax_fanyi2_clear_translations', array(__CLASS__, 'clear_translations'));
+
         // 测试API连接
         add_action('wp_ajax_fanyi2_test_api', array(__CLASS__, 'test_api'));
 
@@ -341,6 +353,113 @@ class Fanyi2_Ajax {
     }
 
     /**
+     * 扫描站点（从批量翻译页面调用）
+     */
+    public static function scan_site() {
+        self::verify_admin();
+
+        // 增加执行时间
+        if (function_exists('set_time_limit')) {
+            set_time_limit(300);
+        }
+
+        $total = Fanyi2_Batch::scan_site_pages();
+
+        wp_send_json_success(array(
+            'message'     => sprintf('扫描完成！共抓取 %d 条文本', $total),
+            'total'       => $total,
+        ));
+    }
+
+    /**
+     * 获取字符串详情及所有翻译
+     */
+    public static function get_string_detail() {
+        self::verify_admin();
+
+        $string_id = isset($_POST['string_id']) ? intval($_POST['string_id']) : 0;
+        if ($string_id <= 0) {
+            wp_send_json_error(array('message' => '无效的字符串ID'));
+        }
+
+        $string = Fanyi2_Database::get_string_with_translations($string_id);
+
+        if (!$string) {
+            wp_send_json_error(array('message' => '字符串不存在'));
+        }
+
+        $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $language_names = Fanyi2_Frontend::get_language_names();
+
+        $translations = array();
+        foreach ($enabled_languages as $lang) {
+            if ($lang === $default_lang) continue;
+            $translations[$lang] = array(
+                'language'    => $lang,
+                'lang_name'   => isset($language_names[$lang]) ? $language_names[$lang] : $lang,
+                'translated'  => isset($string->translations[$lang]) ? $string->translations[$lang]->translated_string : '',
+                'source'      => isset($string->translations[$lang]) ? $string->translations[$lang]->translation_source : '',
+            );
+        }
+
+        wp_send_json_success(array(
+            'id'            => $string->id,
+            'original'      => $string->original_string,
+            'element_type'  => $string->element_type,
+            'page_url'      => $string->page_url,
+            'translations'  => $translations,
+        ));
+    }
+
+    /**
+     * 更新翻译（编辑弹窗保存）
+     */
+    public static function update_translation() {
+        self::verify_admin();
+
+        $string_id = isset($_POST['string_id']) ? intval($_POST['string_id']) : 0;
+        $translations = isset($_POST['translations']) ? $_POST['translations'] : array();
+
+        if ($string_id <= 0) {
+            wp_send_json_error(array('message' => '无效的字符串ID'));
+        }
+
+        if (empty($translations) || !is_array($translations)) {
+            wp_send_json_error(array('message' => '没有翻译数据'));
+        }
+
+        $saved = 0;
+        foreach ($translations as $lang => $text) {
+            $text = wp_unslash($text);
+            if (!empty($text)) {
+                Fanyi2_Database::save_translation($string_id, sanitize_text_field($lang), $text, 'manual');
+                $saved++;
+            }
+        }
+
+        wp_send_json_success(array(
+            'message' => sprintf('已保存 %d 条翻译', $saved),
+            'saved'   => $saved,
+        ));
+    }
+
+    /**
+     * 清除字符串的所有翻译（保留字符串本身）
+     */
+    public static function clear_translations() {
+        self::verify_admin();
+
+        $string_id = isset($_POST['string_id']) ? intval($_POST['string_id']) : 0;
+        if ($string_id <= 0) {
+            wp_send_json_error(array('message' => '无效的字符串ID'));
+        }
+
+        Fanyi2_Database::delete_translations_for_string($string_id);
+        wp_send_json_success(array('message' => '已清除所有翻译'));
+    }
+
+    /**
      * 测试API连接
      */
     public static function test_api() {
@@ -378,6 +497,16 @@ class Fanyi2_Ajax {
             'fanyi2_qwen_api_key',
             'fanyi2_qwen_model',
             'fanyi2_qwen_api_url',
+            'fanyi2_openai_api_key',
+            'fanyi2_openai_model',
+            'fanyi2_openai_api_url',
+            'fanyi2_claude_api_key',
+            'fanyi2_claude_model',
+            'fanyi2_claude_api_url',
+            'fanyi2_google_api_key',
+            'fanyi2_custom_api_key',
+            'fanyi2_custom_api_url',
+            'fanyi2_custom_model',
             'fanyi2_auto_detect_browser',
             'fanyi2_url_mode',
             'fanyi2_batch_size',
@@ -390,6 +519,11 @@ class Fanyi2_Ajax {
             if (in_array($key, $allowed_options)) {
                 update_option(sanitize_text_field($key), $value);
             }
+        }
+
+        // URL模式变更时标记需要刷新重写规则（延迟到下一次 init，让新规则先注册）
+        if (isset($settings['fanyi2_url_mode'])) {
+            set_transient('fanyi2_flush_rewrite', 1, 60);
         }
 
         wp_send_json_success(array('message' => '设置已保存'));

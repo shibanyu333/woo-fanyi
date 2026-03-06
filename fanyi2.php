@@ -13,7 +13,7 @@
  * Requires at least: 5.6
  * Requires PHP: 7.4
  * WC requires at least: 5.0
- * WC tested up to: 8.0
+ * WC tested up to: 9.6
  */
 
 if (!defined('ABSPATH')) {
@@ -44,6 +44,25 @@ final class Fanyi2 {
     private function __construct() {
         $this->load_dependencies();
         $this->init_hooks();
+        $this->declare_wc_compatibility();
+    }
+
+    /**
+     * 声明 WooCommerce 功能兼容性 (HPOS / Custom Order Tables 等)
+     */
+    private function declare_wc_compatibility() {
+        add_action('before_woocommerce_init', function() {
+            if (class_exists('\Automattic\WooCommerce\Utilities\FeaturesUtil')) {
+                // 声明兼容 HPOS (High-Performance Order Storage)
+                \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
+                    'custom_order_tables', __FILE__, true
+                );
+                // 声明兼容 Cart & Checkout Blocks
+                \Automattic\WooCommerce\Utilities\FeaturesUtil::declare_compatibility(
+                    'cart_checkout_blocks', __FILE__, true
+                );
+            }
+        });
     }
 
     /**
@@ -108,6 +127,16 @@ final class Fanyi2 {
             'fanyi2_qwen_api_key'      => '',
             'fanyi2_qwen_model'        => 'qwen-turbo',
             'fanyi2_qwen_api_url'      => 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+            'fanyi2_openai_api_key'    => '',
+            'fanyi2_openai_model'      => 'gpt-4o-mini',
+            'fanyi2_openai_api_url'    => 'https://api.openai.com/v1/chat/completions',
+            'fanyi2_claude_api_key'    => '',
+            'fanyi2_claude_model'      => 'claude-sonnet-4-20250514',
+            'fanyi2_claude_api_url'    => 'https://api.anthropic.com/v1/messages',
+            'fanyi2_google_api_key'    => '',
+            'fanyi2_custom_api_key'    => '',
+            'fanyi2_custom_api_url'    => '',
+            'fanyi2_custom_model'      => '',
             'fanyi2_auto_detect_browser' => '1',
             'fanyi2_url_mode' => 'parameter', // parameter or subdirectory
             'fanyi2_batch_size' => 10,
@@ -145,6 +174,77 @@ final class Fanyi2 {
     public function init() {
         // 注册自定义重写规则用于语言URL
         $this->register_language_routes();
+
+        // 子目录模式下拦截请求并解析语言
+        $this->handle_subdirectory_request();
+
+        // 检查是否需要刷新重写规则（由设置保存触发的延迟刷新）
+        if (get_transient('fanyi2_flush_rewrite')) {
+            delete_transient('fanyi2_flush_rewrite');
+            flush_rewrite_rules();
+        }
+    }
+
+    /**
+     * 处理子目录模式的请求
+     * 核心思路：从 REQUEST_URI 中移除语言前缀，让 WordPress 按照原始路径路由，
+     * 同时通过 cookie 传递检测到的语言。
+     */
+    private function handle_subdirectory_request() {
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+        if ($url_mode !== 'subdirectory') {
+            return;
+        }
+
+        $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+        $path = parse_url($request_uri, PHP_URL_PATH);
+        $home_path = parse_url(home_url(), PHP_URL_PATH);
+        $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
+        $relative = $path;
+        if ($home_path_clean) {
+            $relative = substr($path, strlen($home_path_clean));
+        }
+        $relative = ltrim($relative, '/');
+
+        $languages = get_option('fanyi2_enabled_languages', array());
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        // 检查路径的第一段是否是语言代码
+        $segments = explode('/', $relative);
+        if (!empty($segments[0]) && in_array($segments[0], $languages) && $segments[0] !== $default_lang) {
+            $detected_lang = $segments[0];
+
+            // 设置 cookie 以便语言检测使用
+            if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $detected_lang) {
+                setcookie('fanyi2_language', $detected_lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
+            }
+            $_COOKIE['fanyi2_language'] = $detected_lang;
+
+            // 从 REQUEST_URI 中移除语言前缀，让 WordPress 正常路由
+            array_shift($segments);
+            $clean = implode('/', $segments);
+            $new_uri = $home_path_clean . '/' . $clean;
+            // 确保首页 URL 至少是 /
+            if (empty(trim($new_uri, '/'))) {
+                $new_uri = $home_path_clean ? $home_path_clean . '/' : '/';
+            }
+
+            // 保留查询字符串
+            $qs = parse_url($request_uri, PHP_URL_QUERY);
+            if ($qs) {
+                $new_uri .= '?' . $qs;
+            }
+
+            $_SERVER['REQUEST_URI'] = $new_uri;
+
+            // 修正 canonical redirect：让 WordPress 重定向时保留语言前缀
+            add_filter('redirect_canonical', function($redirect_url) use ($detected_lang, $default_lang) {
+                if ($detected_lang === $default_lang) {
+                    return $redirect_url;
+                }
+                return Fanyi2_Frontend::get_language_url($detected_lang, $redirect_url);
+            }, 10, 1);
+        }
     }
 
     /**
@@ -152,13 +252,27 @@ final class Fanyi2 {
      */
     private function register_language_routes() {
         $url_mode = get_option('fanyi2_url_mode', 'parameter');
+
+        // 参数模式也需要注册 query var
+        add_filter('query_vars', function($vars) {
+            $vars[] = 'lang';
+            $vars[] = 'fanyi2_lang';
+            $vars[] = 'fanyi2_path';
+            return $vars;
+        });
+
         if ($url_mode === 'subdirectory') {
             $languages = get_option('fanyi2_enabled_languages', array());
             $default_lang = get_option('fanyi2_default_language', 'zh');
             foreach ($languages as $lang) {
                 if ($lang !== $default_lang) {
                     add_rewrite_rule(
-                        '^' . $lang . '/?(.*)$',
+                        '^' . $lang . '/?$',
+                        'index.php?fanyi2_lang=' . $lang,
+                        'top'
+                    );
+                    add_rewrite_rule(
+                        '^' . $lang . '/(.+)$',
                         'index.php?fanyi2_lang=' . $lang . '&fanyi2_path=$matches[1]',
                         'top'
                     );
@@ -166,6 +280,18 @@ final class Fanyi2 {
             }
             add_rewrite_tag('%fanyi2_lang%', '([a-z]{2})');
             add_rewrite_tag('%fanyi2_path%', '(.*)');
+
+            // 子目录模式下重写链接
+            add_action('template_redirect', function() {
+                $lang = get_query_var('fanyi2_lang');
+                if (!empty($lang)) {
+                    // 设置cookie
+                    if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $lang) {
+                        setcookie('fanyi2_language', $lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
+                        $_COOKIE['fanyi2_language'] = $lang;
+                    }
+                }
+            }, 0);
         }
     }
 
@@ -199,6 +325,7 @@ final class Fanyi2 {
             'default_language' => get_option('fanyi2_default_language', 'zh'),
             'enabled_languages'=> get_option('fanyi2_enabled_languages', array()),
             'url_mode'         => get_option('fanyi2_url_mode', 'parameter'),
+            'home_url'         => home_url('/'),
             'is_editor'        => current_user_can('manage_options') && isset($_GET['fanyi2_editor']) ? '1' : '0',
             'is_rtl'           => $is_rtl ? '1' : '0',
             'language_names'   => Fanyi2_Frontend::get_language_names(),

@@ -27,33 +27,59 @@ class Fanyi2_Frontend {
 
         // 添加hreflang标签用于SEO
         add_action('wp_head', array(__CLASS__, 'add_hreflang_tags'));
+
+        // 注册 WooCommerce 专用翻译钩子
+        add_action('wp', array('Fanyi2_Translator', 'register_wc_hooks'));
     }
 
     /**
      * 检测并设置当前语言
      */
     public static function detect_and_set_language() {
-        // 优先级: URL参数 > Cookie > IP检测 > 默认语言
+        // 优先级: URL参数/路径 > Cookie > 浏览器语言检测 > 默认语言
         $language = null;
 
-        // 1. URL参数/路径
+        // 1. URL参数 (?lang=xx)
         if (isset($_GET['lang'])) {
             $language = sanitize_text_field($_GET['lang']);
-        } elseif (get_query_var('fanyi2_lang')) {
-            $language = get_query_var('fanyi2_lang');
         }
 
-        // 2. Cookie
+        // 2. 子目录模式路径 (/en/xxx)
+        if (empty($language)) {
+            $fanyi2_lang = get_query_var('fanyi2_lang');
+            if (!empty($fanyi2_lang)) {
+                $language = $fanyi2_lang;
+            }
+        }
+
+        // 2b. 直接从 REQUEST_URI 解析（fallback，防止 rewrite 未生效）
+        if (empty($language) && get_option('fanyi2_url_mode', 'parameter') === 'subdirectory') {
+            $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+            $path = parse_url($request_uri, PHP_URL_PATH);
+            $home_path = parse_url(home_url(), PHP_URL_PATH);
+            if ($home_path) {
+                $path = substr($path, strlen($home_path));
+            }
+            $path = ltrim($path, '/');
+            $segments = explode('/', $path);
+            $enabled = get_option('fanyi2_enabled_languages', array());
+            $default_lang = get_option('fanyi2_default_language', 'zh');
+            if (!empty($segments[0]) && in_array($segments[0], $enabled) && $segments[0] !== $default_lang) {
+                $language = $segments[0];
+            }
+        }
+
+        // 3. Cookie
         if (empty($language) && isset($_COOKIE['fanyi2_language'])) {
             $language = sanitize_text_field($_COOKIE['fanyi2_language']);
         }
 
-        // 3. 浏览器语言检测
+        // 4. 浏览器语言检测
         if (empty($language)) {
             $language = Fanyi2_IP_Detector::detect_language();
         }
 
-        // 4. 默认语言
+        // 5. 默认语言
         if (empty($language)) {
             $language = get_option('fanyi2_default_language', 'zh');
         }
@@ -157,7 +183,7 @@ class Fanyi2_Frontend {
             <?php elseif ($style === 'minimal'): ?>
                 <select class="fanyi2-switcher-select" onchange="if(this.value)location.href=this.value">
                     <?php foreach ($enabled_languages as $lang):
-                        $url = add_query_arg('lang', $lang, remove_query_arg('lang'));
+                        $url = self::get_language_url($lang);
                     ?>
                         <option value="<?php echo esc_url($url); ?>" <?php selected($lang, $current_language); ?>>
                             <?php echo esc_html(($language_flags[$lang] ?? '') . ' ' . ($language_names[$lang] ?? $lang)); ?>
@@ -308,14 +334,78 @@ class Fanyi2_Frontend {
      */
     public static function add_hreflang_tags() {
         $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+        $default_lang = get_option('fanyi2_default_language', 'zh');
         $current_url = home_url(add_query_arg(array()));
 
         foreach ($enabled_languages as $lang) {
-            $lang_url = add_query_arg('lang', $lang, remove_query_arg('lang', $current_url));
+            $lang_url = self::get_language_url($lang, $current_url);
             $hreflang = ($lang === 'zh') ? 'zh-Hans' : $lang;
             echo '<link rel="alternate" hreflang="' . esc_attr($hreflang) . '" href="' . esc_url($lang_url) . '" />' . "\n";
         }
-        echo '<link rel="alternate" hreflang="x-default" href="' . esc_url(remove_query_arg('lang', $current_url)) . '" />' . "\n";
+        echo '<link rel="alternate" hreflang="x-default" href="' . esc_url(self::get_language_url($default_lang, $current_url)) . '" />' . "\n";
+    }
+
+    /**
+     * 获取指定语言的URL（支持参数模式和子目录模式）
+     */
+    public static function get_language_url($lang, $base_url = '') {
+        if (empty($base_url)) {
+            $base_url = home_url(add_query_arg(array()));
+        }
+
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        if ($url_mode === 'subdirectory') {
+            // 子目录模式
+            $parsed = parse_url($base_url);
+            $home_parsed = parse_url(home_url());
+            $home_path = isset($home_parsed['path']) ? rtrim($home_parsed['path'], '/') : '';
+            $path = isset($parsed['path']) ? $parsed['path'] : '/';
+
+            // 移除当前语言前缀
+            $relative_path = $path;
+            if ($home_path) {
+                $relative_path = substr($path, strlen($home_path));
+            }
+            $relative_path = ltrim($relative_path, '/');
+
+            $enabled_languages = get_option('fanyi2_enabled_languages', array());
+            $segments = explode('/', $relative_path);
+            if (!empty($segments[0]) && in_array($segments[0], $enabled_languages)) {
+                array_shift($segments);
+            }
+            $clean_path = implode('/', $segments);
+
+            // 构建新URL
+            if ($lang === $default_lang) {
+                $new_path = $home_path . '/' . $clean_path;
+            } else {
+                $new_path = $home_path . '/' . $lang . '/' . $clean_path;
+            }
+
+            $new_url = (isset($parsed['scheme']) ? $parsed['scheme'] : 'https') . '://' . $parsed['host'];
+            if (isset($parsed['port'])) {
+                $new_url .= ':' . $parsed['port'];
+            }
+            $new_url .= rtrim($new_path, '/') . '/';
+            if (isset($parsed['query'])) {
+                // 移除 lang 参数
+                parse_str($parsed['query'], $query_params);
+                unset($query_params['lang']);
+                if (!empty($query_params)) {
+                    $new_url .= '?' . http_build_query($query_params);
+                }
+            }
+            return $new_url;
+        } else {
+            // 参数模式
+            if ($lang === $default_lang) {
+                return remove_query_arg('lang', $base_url);
+            }
+            return add_query_arg('lang', $lang, remove_query_arg('lang', $base_url));
+        }
     }
 
     /**
@@ -402,6 +492,117 @@ class Fanyi2_Frontend {
         ob_start();
         self::output_language_switcher($atts['style'], 'inline');
         return ob_get_clean();
+    }
+
+    // ====== 导航菜单集成 ======
+
+    /**
+     * 在 外观>菜单 编辑器中注册 "Fanyi2 语言切换器" 面板
+     */
+    public static function register_nav_menu_metabox() {
+        add_meta_box(
+            'fanyi2-language-switcher-nav',
+            'Fanyi2 语言切换器',
+            array(__CLASS__, 'render_nav_menu_metabox'),
+            'nav-menus',
+            'side',
+            'low'
+        );
+    }
+
+    /**
+     * 渲染菜单编辑器中的语言切换器面板
+     */
+    public static function render_nav_menu_metabox() {
+        ?>
+        <div id="fanyi2-nav-menu-metabox" class="posttypediv">
+            <p class="description" style="margin-bottom:10px;">
+                添加语言切换菜单项。无自带样式，完全继承主题菜单风格。
+            </p>
+            <div id="tabs-panel-fanyi2" class="tabs-panel tabs-panel-active">
+                <ul class="categorychecklist form-no-clear">
+                    <li>
+                        <label>
+                            <input type="checkbox" class="menu-item-checkbox"
+                                   name="menu-item[-1][menu-item-object-id]" value="-1">
+                            语言切换器（下拉子菜单）
+                        </label>
+                    </li>
+                </ul>
+            </div>
+            <p class="button-controls wp-clearfix">
+                <span class="add-to-menu">
+                    <input type="submit" class="button submit-add-to-menu right"
+                           value="添加到菜单"
+                           name="add-fanyi2-menu-item"
+                           id="fanyi2-add-to-menu"
+                           onclick="fanyi2AddToMenu(); return false;">
+                </span>
+            </p>
+            <script>
+            function fanyi2AddToMenu() {
+                // 使用 WordPress 菜单 API 添加自定义链接
+                wpNavMenu.addItemToMenu({
+                    '-1': {
+                        'menu-item-type': 'custom',
+                        'menu-item-url': '#fanyi2-language-switcher',
+                        'menu-item-title': '🌐 语言'
+                    }
+                }, wpNavMenu.addMenuItemToBottom, function() {});
+            }
+            </script>
+            <p class="description" style="margin-top:10px; font-size:11px;">
+                <strong>用法说明：</strong><br>
+                1. 添加后，菜单中会出现"🌐 语言"项<br>
+                2. 各语言选项会自动作为子菜单显示<br>
+                3. 不附带额外样式，完全使用主题样式<br>
+                4. 也可手动添加自定义链接，URL 填 <code>#fanyi2-language-switcher</code>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * 在前台渲染菜单时，将 #fanyi2-language-switcher 占位链接
+     * 替换为实际的语言切换子菜单项（纯 HTML <li>，无额外样式）
+     */
+    public static function filter_nav_menu_items($items, $args) {
+        // 检查菜单中是否包含我们的占位链接
+        if (strpos($items, '#fanyi2-language-switcher') === false) {
+            return $items;
+        }
+
+        $enabled_languages = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+        $current_language = self::get_current_language();
+        $language_names = self::get_language_names();
+        $language_flags = self::get_language_flags();
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        // 构建子菜单项（使用当前页面 URL 作为基准，而非首页）
+        $current_page_url = home_url(add_query_arg(array()));
+        $submenu_items = '';
+        foreach ($enabled_languages as $lang) {
+            $lang_name = isset($language_names[$lang]) ? $language_names[$lang] : $lang;
+            $flag = isset($language_flags[$lang]) ? $language_flags[$lang] : '';
+
+            // 使用 get_language_url 生成当前页面在各语言下的 URL
+            $url = self::get_language_url($lang, $current_page_url);
+
+            $active_class = ($lang === $current_language) ? ' current-menu-item current-lang' : '';
+            $submenu_items .= '<li class="menu-item fanyi2-menu-lang-item' . $active_class . '">';
+            $submenu_items .= '<a href="' . esc_url($url) . '" data-fanyi2-lang="' . esc_attr($lang) . '">';
+            $submenu_items .= $flag . ' ' . esc_html($lang_name);
+            $submenu_items .= '</a></li>';
+        }
+
+        // 替换占位链接为带子菜单的菜单项
+        // 找到包含 #fanyi2-language-switcher 的 <li> 并在其中注入 <ul class="sub-menu">
+        $pattern = '/(<li[^>]*class="[^"]*menu-item[^"]*"[^>]*>)\s*<a[^>]*href="[^"]*#fanyi2-language-switcher[^"]*"[^>]*>([^<]*)<\/a>\s*(<\/li>)/s';
+        $replacement = '${1}<a href="#">${2}</a><ul class="sub-menu">' . $submenu_items . '</ul></li>';
+        $items = preg_replace($pattern, $replacement, $items);
+
+        return $items;
     }
 }
 

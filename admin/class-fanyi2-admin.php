@@ -52,8 +52,8 @@ class Fanyi2_Admin {
 
         add_submenu_page(
             'fanyi2',
-            '批量翻译',
-            '批量翻译',
+            '整站翻译',
+            '整站翻译',
             'manage_options',
             'fanyi2-batch',
             array(__CLASS__, 'render_batch_page')
@@ -168,7 +168,7 @@ class Fanyi2_Admin {
                             🖊️ 打开可视化编辑器
                         </a>
                         <a href="<?php echo admin_url('admin.php?page=fanyi2-batch'); ?>" class="button button-secondary button-hero">
-                            🤖 批量AI翻译
+                            🤖 整站翻译
                         </a>
                         <a href="<?php echo admin_url('admin.php?page=fanyi2-settings'); ?>" class="button button-secondary button-hero">
                             ⚙️ 插件设置
@@ -184,7 +184,7 @@ class Fanyi2_Admin {
                         <li><strong>抓取文本:</strong> 打开可视化编辑器，点击"抓取所有文本"自动采集页面内容</li>
                         <li><strong>表格翻译:</strong> 抓取后会弹出表格，可一键 AI 翻译或手动编辑，便于复制汉化</li>
                         <li><strong>点选翻译:</strong> 在编辑器模式下，点击任意文本元素即可单独翻译</li>
-                        <li><strong>批量翻译:</strong> 在批量翻译页面，扫描全站后一键预翻译所有内容</li>
+                        <li><strong>整站翻译:</strong> 在整站翻译页面，扫描全站后一键翻译所有内容</li>
                         <li><strong>浏览器语言:</strong> 启用后自动根据访客浏览器语言切换对应语言</li>
                         <li><strong>汇率转换:</strong> 请安装并配置 woo-huilv 汇率插件，本插件会自动将当前语言传递给它</li>
                     </ol>
@@ -200,6 +200,9 @@ class Fanyi2_Admin {
     public static function render_translations_page() {
         $page = isset($_GET['paged']) ? max(1, intval($_GET['paged'])) : 1;
         $search = isset($_GET['s']) ? sanitize_text_field($_GET['s']) : '';
+        $filter_status = isset($_GET['filter_status']) ? sanitize_text_field($_GET['filter_status']) : '';
+        $filter_lang = isset($_GET['filter_lang']) ? sanitize_text_field($_GET['filter_lang']) : '';
+        $filter_type = isset($_GET['filter_type']) ? sanitize_text_field($_GET['filter_type']) : '';
         $language_names = Fanyi2_Frontend::get_language_names();
         $enabled_languages = get_option('fanyi2_enabled_languages', array());
         $default_lang = get_option('fanyi2_default_language', 'zh');
@@ -208,57 +211,121 @@ class Fanyi2_Admin {
             'page'     => $page,
             'per_page' => 20,
             'search'   => $search,
+            'translation_status' => $filter_status,
+            'filter_language'    => $filter_lang,
+            'domain'             => $filter_type === 'woocommerce' ? 'woocommerce' : '',
         ));
+
+        $target_languages = array_values(array_filter($enabled_languages, function($l) use ($default_lang) {
+            return $l !== $default_lang;
+        }));
+        $target_lang_count = count($target_languages);
         ?>
         <div class="wrap fanyi2-admin-wrap">
             <h1>📝 翻译管理</h1>
 
+            <!-- 筛选工具栏 -->
             <div class="fanyi2-toolbar">
                 <form method="get" class="fanyi2-search-form">
                     <input type="hidden" name="page" value="fanyi2-translations">
-                    <input type="text" name="s" value="<?php echo esc_attr($search); ?>" placeholder="搜索字符串..." class="regular-text">
-                    <button type="submit" class="button">搜索</button>
+                    <input type="text" name="s" value="<?php echo esc_attr($search); ?>" placeholder="搜索原文内容..." class="regular-text">
+                    <select name="filter_status">
+                        <option value="">全部状态</option>
+                        <option value="translated" <?php selected($filter_status, 'translated'); ?>>✅ 已翻译</option>
+                        <option value="untranslated" <?php selected($filter_status, 'untranslated'); ?>>❌ 未翻译</option>
+                        <option value="partial" <?php selected($filter_status, 'partial'); ?>>⚠️ 部分翻译</option>
+                    </select>
+                    <select name="filter_lang">
+                        <option value="">所有语言</option>
+                        <?php foreach ($target_languages as $lang): ?>
+                            <option value="<?php echo esc_attr($lang); ?>" <?php selected($filter_lang, $lang); ?>>
+                                <?php echo esc_html(($language_names[$lang] ?? $lang) . ' (' . $lang . ')'); ?>
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                    <select name="filter_type">
+                        <option value="">全部来源</option>
+                        <option value="woocommerce" <?php selected($filter_type, 'woocommerce'); ?>>WooCommerce</option>
+                    </select>
+                    <button type="submit" class="button">🔍 搜索</button>
+                    <?php if (!empty($search) || !empty($filter_status) || !empty($filter_lang) || !empty($filter_type)): ?>
+                        <a href="<?php echo admin_url('admin.php?page=fanyi2-translations'); ?>" class="button">✕ 清除筛选</a>
+                    <?php endif; ?>
                 </form>
-                <span class="fanyi2-total-count">共 <?php echo $result['total']; ?> 条字符串</span>
+                <div class="fanyi2-toolbar-right">
+                    <span class="fanyi2-total-count">共 <strong><?php echo $result['total']; ?></strong> 条字符串</span>
+                </div>
             </div>
 
-            <table class="wp-list-table widefat fixed striped fanyi2-table">
+            <!-- 翻译表格 -->
+            <table class="wp-list-table widefat fixed striped fanyi2-table fanyi2-translations-table">
                 <thead>
                     <tr>
-                        <th style="width:5%">ID</th>
-                        <th style="width:35%">原文</th>
-                        <th style="width:35%">已翻译语言</th>
-                        <th style="width:10%">类型</th>
-                        <th style="width:15%">操作</th>
+                        <th class="column-id" style="width:4%">ID</th>
+                        <th class="column-original" style="width:40%">原文 / 来源</th>
+                        <th class="column-translations" style="width:36%">翻译状态</th>
+                        <th class="column-actions" style="width:20%">操作</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if (empty($result['items'])): ?>
-                    <tr><td colspan="5" style="text-align:center;padding:20px;">暂无翻译数据。请先使用可视化编辑器抓取文本。</td></tr>
+                    <tr>
+                        <td colspan="4" style="text-align:center;padding:40px 20px;">
+                            <div style="font-size:16px;color:#666;margin-bottom:10px;">暂无翻译数据</div>
+                            <p style="color:#999;">请先前往 <a href="<?php echo admin_url('admin.php?page=fanyi2-batch'); ?>">整站翻译</a> 页面扫描站点文本，或使用 <a href="<?php echo esc_url(home_url('?fanyi2_editor=1')); ?>" target="_blank">可视化编辑器</a> 抓取。</p>
+                        </td>
+                    </tr>
                     <?php else: ?>
-                    <?php foreach ($result['items'] as $item): ?>
+                    <?php foreach ($result['items'] as $item):
+                        $translated_langs = $item->translated_languages ? explode(',', $item->translated_languages) : array();
+                        $trans_count = count($translated_langs);
+                        // 计算状态
+                        if ($trans_count === 0) {
+                            $status_class = 'status-none';
+                            $status_label = '未翻译';
+                        } elseif ($trans_count >= $target_lang_count) {
+                            $status_class = 'status-complete';
+                            $status_label = '已完成';
+                        } else {
+                            $status_class = 'status-partial';
+                            $status_label = $trans_count . '/' . $target_lang_count;
+                        }
+                    ?>
                     <tr data-string-id="<?php echo $item->id; ?>">
-                        <td><?php echo $item->id; ?></td>
-                        <td>
-                            <div class="fanyi2-original-text"><?php echo esc_html(mb_strimwidth($item->original_string, 0, 80, '...')); ?></div>
+                        <td class="column-id"><?php echo $item->id; ?></td>
+                        <td class="column-original">
+                            <div class="fanyi2-original-text" title="<?php echo esc_attr($item->original_string); ?>">
+                                <?php echo esc_html(mb_strimwidth($item->original_string, 0, 120, '...')); ?>
+                            </div>
+                            <div class="fanyi2-string-meta">
+                                <span class="fanyi2-type-badge"><?php echo esc_html($item->element_type); ?></span>
+                                <?php if (!empty($item->domain) && $item->domain !== 'general'): ?>
+                                    <span class="fanyi2-domain-badge"><?php echo esc_html($item->domain); ?></span>
+                                <?php endif; ?>
+                                <?php if (!empty($item->page_url)): ?>
+                                    <a href="<?php echo esc_url($item->page_url); ?>" target="_blank" class="fanyi2-page-link" title="<?php echo esc_attr($item->page_url); ?>">
+                                        📍 <?php echo esc_html(self::abbreviate_url($item->page_url)); ?>
+                                    </a>
+                                <?php endif; ?>
+                            </div>
                         </td>
-                        <td>
-                            <?php 
-                            $translated_langs = $item->translated_languages ? explode(',', $item->translated_languages) : array();
-                            foreach ($enabled_languages as $lang):
-                                if ($lang === $default_lang) continue;
-                                $is_translated = in_array($lang, $translated_langs);
-                            ?>
-                                <span class="fanyi2-lang-badge <?php echo $is_translated ? 'translated' : 'untranslated'; ?>"
-                                      title="<?php echo esc_attr($language_names[$lang] ?? $lang); ?>">
-                                    <?php echo esc_html($lang); ?>
-                                </span>
-                            <?php endforeach; ?>
+                        <td class="column-translations">
+                            <span class="fanyi2-status-indicator <?php echo esc_attr($status_class); ?>"><?php echo esc_html($status_label); ?></span>
+                            <div class="fanyi2-lang-badges">
+                                <?php foreach ($target_languages as $lang):
+                                    $is_translated = in_array($lang, $translated_langs);
+                                ?>
+                                    <span class="fanyi2-lang-badge <?php echo $is_translated ? 'translated' : 'untranslated'; ?> fanyi2-badge-clickable"
+                                          data-id="<?php echo $item->id; ?>"
+                                          title="<?php echo esc_attr(($language_names[$lang] ?? $lang) . ': ' . ($is_translated ? '已翻译 - 点击编辑' : '未翻译 - 点击编辑')); ?>">
+                                        <?php echo esc_html($lang); ?>
+                                    </span>
+                                <?php endforeach; ?>
+                            </div>
                         </td>
-                        <td><span class="fanyi2-type-badge"><?php echo esc_html($item->element_type); ?></span></td>
-                        <td>
-                            <button class="button button-small fanyi2-edit-string" data-id="<?php echo $item->id; ?>">编辑</button>
-                            <button class="button button-small fanyi2-delete-string" data-id="<?php echo $item->id; ?>">删除</button>
+                        <td class="column-actions">
+                            <button class="button button-small fanyi2-ai-single-string" data-id="<?php echo $item->id; ?>" title="AI翻译此条所有语言">🤖</button>
+                            <button class="button button-small fanyi2-delete-string" data-id="<?php echo $item->id; ?>" title="清除翻译">🗑️</button>
                         </td>
                     </tr>
                     <?php endforeach; ?>
@@ -288,11 +355,12 @@ class Fanyi2_Admin {
                 <div class="fanyi2-modal-content">
                     <div class="fanyi2-modal-header">
                         <h2>编辑翻译</h2>
+                        <span id="fanyi2-modal-meta" style="font-size:12px;color:#999;"></span>
                         <button class="fanyi2-modal-close">&times;</button>
                     </div>
                     <div class="fanyi2-modal-body">
                         <div class="fanyi2-field">
-                            <label>原文:</label>
+                            <label>原文 (<?php echo esc_html($language_names[$default_lang] ?? $default_lang); ?>):</label>
                             <textarea id="fanyi2-modal-original" readonly rows="3"></textarea>
                         </div>
                         <div id="fanyi2-modal-translations"></div>
@@ -309,7 +377,23 @@ class Fanyi2_Admin {
     }
 
     /**
-     * 渲染批量翻译页面
+     * 缩略显示URL（去掉域名保留路径）
+     */
+    private static function abbreviate_url($url) {
+        $parsed = parse_url($url);
+        $path = isset($parsed['path']) ? $parsed['path'] : '/';
+        $path = rtrim($path, '/');
+        if (empty($path)) {
+            $path = '/';
+        }
+        if (mb_strlen($path) > 40) {
+            $path = '...' . mb_substr($path, -37);
+        }
+        return $path;
+    }
+
+    /**
+     * 渲染整站翻译页面
      */
     public static function render_batch_page() {
         $language_names = Fanyi2_Frontend::get_language_names();
@@ -318,13 +402,13 @@ class Fanyi2_Admin {
         $batch_size = get_option('fanyi2_batch_size', 10);
         ?>
         <div class="wrap fanyi2-admin-wrap">
-            <h1>🤖 批量翻译</h1>
+            <h1>🤖 整站翻译</h1>
 
             <div class="fanyi2-dashboard-grid">
                 <!-- 扫描站点 -->
                 <div class="fanyi2-card">
                     <h2>📡 扫描站点文本</h2>
-                    <p>自动扫描站点所有页面，抓取需要翻译的文本内容。</p>
+                    <p>自动扫描数据库中所有页面、文章、产品、菜单、分类等内容，抓取需要翻译的文本。</p>
                     <button id="fanyi2-scan-site" class="button button-primary button-hero">
                         🔍 扫描整个站点
                     </button>
@@ -338,7 +422,7 @@ class Fanyi2_Admin {
 
                 <!-- 预翻译 -->
                 <div class="fanyi2-card">
-                    <h2>🌍 AI预翻译</h2>
+                    <h2>🌍 AI翻译</h2>
                     <p>使用AI自动翻译所有未翻译的字符串。</p>
                     <div class="fanyi2-field" style="margin-bottom:15px;">
                         <label for="fanyi2-batch-target-lang">目标语言:</label>
@@ -357,7 +441,7 @@ class Fanyi2_Admin {
                         <input type="number" id="fanyi2-batch-size" value="<?php echo esc_attr($batch_size); ?>" min="1" max="50" style="width:80px;">
                     </div>
                     <button id="fanyi2-start-pretranslate" class="button button-primary button-hero">
-                        🚀 开始预翻译
+                        🚀 开始翻译
                     </button>
                     <button id="fanyi2-translate-all-langs" class="button button-secondary button-hero">
                         🌐 翻译所有语言
@@ -436,6 +520,22 @@ class Fanyi2_Admin {
                                 <input type="radio" name="fanyi2_ai_engine" value="qwen" <?php checked($ai_engine, 'qwen'); ?>>
                                 <strong>通义千问 (Qwen)</strong> - 阿里云大模型，多语言支持
                             </label>
+                            <label>
+                                <input type="radio" name="fanyi2_ai_engine" value="openai" <?php checked($ai_engine, 'openai'); ?>>
+                                <strong>OpenAI / GPT</strong> - GPT-4o/4o-mini，翻译质量高
+                            </label>
+                            <label>
+                                <input type="radio" name="fanyi2_ai_engine" value="claude" <?php checked($ai_engine, 'claude'); ?>>
+                                <strong>Claude (Anthropic)</strong> - Claude 大模型，理解力强
+                            </label>
+                            <label>
+                                <input type="radio" name="fanyi2_ai_engine" value="google" <?php checked($ai_engine, 'google'); ?>>
+                                <strong>Google Translate API</strong> - 谷歌翻译，速度快、语言覆盖广
+                            </label>
+                            <label>
+                                <input type="radio" name="fanyi2_ai_engine" value="custom" <?php checked($ai_engine, 'custom'); ?>>
+                                <strong>自定义 OpenAI 兼容接口</strong> - 支持中转站、本地部署等
+                            </label>
                         </div>
                     </div>
 
@@ -472,8 +572,8 @@ class Fanyi2_Admin {
                             <tr>
                                 <th>测试连接</th>
                                 <td>
-                                    <button type="button" id="fanyi2-test-deepseek" class="button">🔗 测试DeepSeek连接</button>
-                                    <span id="fanyi2-deepseek-test-result"></span>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="deepseek">🔗 测试DeepSeek连接</button>
+                                    <span class="fanyi2-test-result" data-engine="deepseek"></span>
                                 </td>
                             </tr>
                         </table>
@@ -512,8 +612,152 @@ class Fanyi2_Admin {
                             <tr>
                                 <th>测试连接</th>
                                 <td>
-                                    <button type="button" id="fanyi2-test-qwen" class="button">🔗 测试千问连接</button>
-                                    <span id="fanyi2-qwen-test-result"></span>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="qwen">🔗 测试千问连接</button>
+                                    <span class="fanyi2-test-result" data-engine="qwen"></span>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div class="fanyi2-card" id="openai-settings">
+                        <h2>OpenAI / GPT 设置</h2>
+                        <table class="form-table">
+                            <tr>
+                                <th>API Key</th>
+                                <td>
+                                    <input type="password" name="fanyi2_openai_api_key" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_openai_api_key', '')); ?>"
+                                           class="regular-text" placeholder="sk-...">
+                                    <p class="description">在 <a href="https://platform.openai.com/api-keys" target="_blank">OpenAI 平台</a> 获取API Key</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>模型</th>
+                                <td>
+                                    <select name="fanyi2_openai_model">
+                                        <option value="gpt-4o-mini" <?php selected(get_option('fanyi2_openai_model', 'gpt-4o-mini'), 'gpt-4o-mini'); ?>>gpt-4o-mini (快速、便宜)</option>
+                                        <option value="gpt-4o" <?php selected(get_option('fanyi2_openai_model', 'gpt-4o-mini'), 'gpt-4o'); ?>>gpt-4o (高质量)</option>
+                                        <option value="gpt-4-turbo" <?php selected(get_option('fanyi2_openai_model', 'gpt-4o-mini'), 'gpt-4-turbo'); ?>>gpt-4-turbo</option>
+                                        <option value="gpt-3.5-turbo" <?php selected(get_option('fanyi2_openai_model', 'gpt-4o-mini'), 'gpt-3.5-turbo'); ?>>gpt-3.5-turbo (经济)</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>API URL</th>
+                                <td>
+                                    <input type="url" name="fanyi2_openai_api_url" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_openai_api_url', 'https://api.openai.com/v1/chat/completions')); ?>"
+                                           class="regular-text">
+                                    <p class="description">如使用代理/中转站可修改此地址</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>测试连接</th>
+                                <td>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="openai">🔗 测试OpenAI连接</button>
+                                    <span class="fanyi2-test-result" data-engine="openai"></span>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div class="fanyi2-card" id="claude-settings">
+                        <h2>Claude (Anthropic) 设置</h2>
+                        <table class="form-table">
+                            <tr>
+                                <th>API Key</th>
+                                <td>
+                                    <input type="password" name="fanyi2_claude_api_key" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_claude_api_key', '')); ?>"
+                                           class="regular-text" placeholder="sk-ant-...">
+                                    <p class="description">在 <a href="https://console.anthropic.com/settings/keys" target="_blank">Anthropic 控制台</a> 获取API Key</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>模型</th>
+                                <td>
+                                    <select name="fanyi2_claude_model">
+                                        <option value="claude-sonnet-4-20250514" <?php selected(get_option('fanyi2_claude_model', 'claude-sonnet-4-20250514'), 'claude-sonnet-4-20250514'); ?>>Claude Sonnet 4 (推荐)</option>
+                                        <option value="claude-3-5-sonnet-20241022" <?php selected(get_option('fanyi2_claude_model', 'claude-sonnet-4-20250514'), 'claude-3-5-sonnet-20241022'); ?>>Claude 3.5 Sonnet</option>
+                                        <option value="claude-3-haiku-20240307" <?php selected(get_option('fanyi2_claude_model', 'claude-sonnet-4-20250514'), 'claude-3-haiku-20240307'); ?>>Claude 3 Haiku (快速)</option>
+                                    </select>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>API URL</th>
+                                <td>
+                                    <input type="url" name="fanyi2_claude_api_url" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_claude_api_url', 'https://api.anthropic.com/v1/messages')); ?>"
+                                           class="regular-text">
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>测试连接</th>
+                                <td>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="claude">🔗 测试Claude连接</button>
+                                    <span class="fanyi2-test-result" data-engine="claude"></span>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div class="fanyi2-card" id="google-settings">
+                        <h2>Google Translate API 设置</h2>
+                        <table class="form-table">
+                            <tr>
+                                <th>API Key</th>
+                                <td>
+                                    <input type="password" name="fanyi2_google_api_key" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_google_api_key', '')); ?>"
+                                           class="regular-text">
+                                    <p class="description">在 <a href="https://console.cloud.google.com/apis/credentials" target="_blank">Google Cloud Console</a> 获取API Key，需启用 Cloud Translation API</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>测试连接</th>
+                                <td>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="google">🔗 测试Google翻译连接</button>
+                                    <span class="fanyi2-test-result" data-engine="google"></span>
+                                </td>
+                            </tr>
+                        </table>
+                    </div>
+
+                    <div class="fanyi2-card" id="custom-settings">
+                        <h2>自定义 OpenAI 兼容接口设置</h2>
+                        <p class="description">适用于任何兼容 OpenAI Chat Completions API 格式的接口，例如：本地部署的 LLM、中转API站点等。</p>
+                        <table class="form-table">
+                            <tr>
+                                <th>API Key</th>
+                                <td>
+                                    <input type="password" name="fanyi2_custom_api_key" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_custom_api_key', '')); ?>"
+                                           class="regular-text" placeholder="your-api-key">
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>API URL</th>
+                                <td>
+                                    <input type="url" name="fanyi2_custom_api_url" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_custom_api_url', '')); ?>"
+                                           class="regular-text" placeholder="https://your-api.com/v1/chat/completions">
+                                    <p class="description">完整的 Chat Completions 端点URL</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>模型名称</th>
+                                <td>
+                                    <input type="text" name="fanyi2_custom_model" 
+                                           value="<?php echo esc_attr(get_option('fanyi2_custom_model', '')); ?>"
+                                           class="regular-text" placeholder="model-name">
+                                    <p class="description">API对应的模型ID</p>
+                                </td>
+                            </tr>
+                            <tr>
+                                <th>测试连接</th>
+                                <td>
+                                    <button type="button" class="button fanyi2-test-api-btn" data-engine="custom">🔗 测试自定义接口连接</button>
+                                    <span class="fanyi2-test-result" data-engine="custom"></span>
                                 </td>
                             </tr>
                         </table>
@@ -606,7 +850,7 @@ class Fanyi2_Admin {
                     </div>
 
                     <div class="fanyi2-card">
-                        <h2>批量翻译设置</h2>
+                        <h2>整站翻译设置</h2>
                         <table class="form-table">
                             <tr>
                                 <th>每批翻译数量</th>
