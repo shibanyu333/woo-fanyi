@@ -34,43 +34,68 @@ class Fanyi2_Frontend {
 
     /**
      * 检测并设置当前语言
+     *
+     * 优先级（修正版）：
+     *   URL路径/参数 > Cookie（仅参数模式）> 浏览器检测 > 默认语言
+     *
+     * 关键修正：子目录模式下，URL 没有语言前缀 = 默认语言，
+     * 不再回退到 cookie，避免 cookie 残留导致语言"粘滞"。
      */
     public static function detect_and_set_language() {
-        // 优先级: URL参数/路径 > Cookie > 浏览器语言检测 > 默认语言
         $language = null;
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+        $url_determined = false; // 标记 URL 是否明确指定了语言
 
         // 1. URL参数 (?lang=xx)
         if (isset($_GET['lang'])) {
             $language = sanitize_text_field($_GET['lang']);
+            $url_determined = true;
         }
 
-        // 2. 子目录模式路径 (/en/xxx)
-        if (empty($language)) {
-            $fanyi2_lang = get_query_var('fanyi2_lang');
-            if (!empty($fanyi2_lang)) {
-                $language = $fanyi2_lang;
+        // 2. 子目录模式
+        if (empty($language) && $url_mode === 'subdirectory') {
+            // handle_subdirectory_request() 在 init 阶段已将检测到的语言写入 cookie
+            if (isset($_COOKIE['fanyi2_language']) && in_array($_COOKIE['fanyi2_language'], $enabled)) {
+                $cookie_lang = sanitize_text_field($_COOKIE['fanyi2_language']);
+            } else {
+                $cookie_lang = $default_lang;
             }
-        }
 
-        // 2b. 直接从 REQUEST_URI 解析（fallback，防止 rewrite 未生效）
-        if (empty($language) && get_option('fanyi2_url_mode', 'parameter') === 'subdirectory') {
+            // 检查原始 REQUEST_URI 是否包含语言前缀
+            // 注意：handle_subdirectory_request 已经修改了 $_SERVER['REQUEST_URI']，
+            // 所以这里通过 cookie 是否在本次请求中被设为非默认来判断
             $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
-            $path = parse_url($request_uri, PHP_URL_PATH);
+            $req_path = parse_url($request_uri, PHP_URL_PATH);
             $home_path = parse_url(home_url(), PHP_URL_PATH);
-            if ($home_path) {
-                $path = substr($path, strlen($home_path));
+            $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
+            $relative = $req_path;
+            if ($home_path_clean) {
+                $relative = substr($req_path, strlen($home_path_clean));
             }
-            $path = ltrim($path, '/');
-            $segments = explode('/', $path);
-            $enabled = get_option('fanyi2_enabled_languages', array());
-            $default_lang = get_option('fanyi2_default_language', 'zh');
-            if (!empty($segments[0]) && in_array($segments[0], $enabled) && $segments[0] !== $default_lang) {
-                $language = $segments[0];
+            $relative = ltrim($relative ?: '', '/');
+            $segments = explode('/', $relative);
+            $first_seg = !empty($segments[0]) ? $segments[0] : '';
+
+            // 如果 URL 中仍有语言前缀（未被 handle_subdirectory_request 剥离，
+            // 比如 rewrite 阶段晚于 init），使用它
+            if (in_array($first_seg, $enabled) && $first_seg !== $default_lang) {
+                $language = $first_seg;
+            } elseif ($cookie_lang !== $default_lang) {
+                // cookie 从 handle_subdirectory_request 传来
+                $language = $cookie_lang;
+            } else {
+                // 无语言前缀 => 默认语言
+                $language = $default_lang;
             }
+
+            // 子目录模式下 URL 始终是确定性的
+            $url_determined = true;
         }
 
-        // 3. Cookie
-        if (empty($language) && isset($_COOKIE['fanyi2_language'])) {
+        // 3. Cookie（仅参数模式可回退）
+        if (empty($language) && !$url_determined && isset($_COOKIE['fanyi2_language'])) {
             $language = sanitize_text_field($_COOKIE['fanyi2_language']);
         }
 
@@ -81,18 +106,17 @@ class Fanyi2_Frontend {
 
         // 5. 默认语言
         if (empty($language)) {
-            $language = get_option('fanyi2_default_language', 'zh');
+            $language = $default_lang;
         }
 
         // 验证语言是否启用
-        $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
         if (!in_array($language, $enabled)) {
-            $language = get_option('fanyi2_default_language', 'zh');
+            $language = $default_lang;
         }
 
         self::$current_language = $language;
 
-        // 设置Cookie
+        // 设置 Cookie
         if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $language) {
             setcookie('fanyi2_language', $language, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
         }
@@ -172,9 +196,12 @@ class Fanyi2_Frontend {
         <div id="fanyi2-language-switcher" class="fanyi2-language-switcher fanyi2-switcher <?php echo esc_attr($position_class . ' ' . $style_class); ?>">
             <?php if ($style === 'flags'): ?>
                 <div class="fanyi2-switcher-flags">
-                    <?php foreach ($enabled_languages as $lang): ?>
-                        <a href="#" class="fanyi2-flag-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
+                    <?php foreach ($enabled_languages as $lang):
+                        $url = self::get_language_url($lang);
+                    ?>
+                        <a href="<?php echo esc_url($url); ?>" class="fanyi2-flag-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
                            data-lang="<?php echo esc_attr($lang); ?>"
+                           data-fanyi2-lang="<?php echo esc_attr($lang); ?>"
                            title="<?php echo esc_html($language_names[$lang] ?? $lang); ?>">
                             <span class="fanyi2-flag"><?php echo esc_html($language_flags[$lang] ?? '🌐'); ?></span>
                         </a>
@@ -197,9 +224,12 @@ class Fanyi2_Frontend {
                     <span class="fanyi2-arrow">▼</span>
                 </div>
                 <div class="fanyi2-switcher-dropdown">
-                    <?php foreach ($enabled_languages as $lang): ?>
-                        <a href="#" class="fanyi2-lang-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
-                           data-lang="<?php echo esc_attr($lang); ?>">
+                    <?php foreach ($enabled_languages as $lang):
+                        $url = self::get_language_url($lang);
+                    ?>
+                        <a href="<?php echo esc_url($url); ?>" class="fanyi2-lang-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
+                           data-lang="<?php echo esc_attr($lang); ?>"
+                           data-fanyi2-lang="<?php echo esc_attr($lang); ?>">
                             <span class="fanyi2-flag"><?php echo esc_html($language_flags[$lang] ?? '🌐'); ?></span>
                             <span><?php echo esc_html($language_names[$lang] ?? $lang); ?></span>
                         </a>

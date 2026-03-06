@@ -207,6 +207,9 @@ class Fanyi2_Ajax {
 
         $trans_id = Fanyi2_Database::save_translation($string_obj->id, $language, $translated_text, 'manual');
 
+        // 清除翻译缓存
+        Fanyi2_Translator::clear_translation_cache($language);
+
         wp_send_json_success(array(
             'translation_id' => $trans_id,
             'message'        => '翻译已保存',
@@ -248,6 +251,9 @@ class Fanyi2_Ajax {
             }
         }
 
+        // 清除翻译缓存
+        Fanyi2_Translator::clear_translation_cache($language);
+
         wp_send_json_success(array(
             'saved_count' => $saved,
             'message'     => sprintf('成功保存 %d 条翻译', $saved),
@@ -287,6 +293,8 @@ class Fanyi2_Ajax {
         }
 
         Fanyi2_Database::delete_string($string_id);
+        // 清除所有语言的缓存
+        Fanyi2_Translator::clear_translation_cache();
         wp_send_json_success(array('message' => '已删除'));
     }
 
@@ -341,6 +349,9 @@ class Fanyi2_Ajax {
                 $saved++;
             }
         }
+
+        // 清除该语言的翻译缓存
+        Fanyi2_Translator::clear_translation_cache($language);
 
         // 获取剩余未翻译数量
         $remaining = count(Fanyi2_Database::get_untranslated_strings($language, 1));
@@ -434,6 +445,8 @@ class Fanyi2_Ajax {
             $text = wp_unslash($text);
             if (!empty($text)) {
                 Fanyi2_Database::save_translation($string_id, sanitize_text_field($lang), $text, 'manual');
+                // 清除对应语言的翻译缓存
+                Fanyi2_Translator::clear_translation_cache(sanitize_text_field($lang));
                 $saved++;
             }
         }
@@ -456,6 +469,8 @@ class Fanyi2_Ajax {
         }
 
         Fanyi2_Database::delete_translations_for_string($string_id);
+        // 清除所有语言的缓存
+        Fanyi2_Translator::clear_translation_cache();
         wp_send_json_success(array('message' => '已清除所有翻译'));
     }
 

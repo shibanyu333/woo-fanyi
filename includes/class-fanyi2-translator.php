@@ -17,6 +17,8 @@ class Fanyi2_Translator {
     private static $current_language = null;
     private static $translations_cache = array();
     private static $gettext_cache = array();
+    private static $persistent_cache_loaded = false;
+    private static $persistent_cache_group = 'fanyi2_trans';
 
     /**
      * 初始化
@@ -51,8 +53,10 @@ class Fanyi2_Translator {
             return;
         }
 
-        // --- WooCommerce 产品文本 ---
-        add_filter('the_title', array(__CLASS__, 'translate_text_filter'), 20, 1);
+        // --- WooCommerce 产品文本（the_title 仅前端，避免后台列表也被翻译） ---
+        if (!is_admin()) {
+            add_filter('the_title', array(__CLASS__, 'translate_text_filter'), 20, 1);
+        }
         add_filter('woocommerce_product_get_name', array(__CLASS__, 'translate_text_filter'), 20, 1);
         add_filter('woocommerce_product_get_short_description', array(__CLASS__, 'translate_text_filter'), 20, 1);
         add_filter('woocommerce_product_get_description', array(__CLASS__, 'translate_text_filter'), 20, 1);
@@ -168,29 +172,98 @@ class Fanyi2_Translator {
     }
 
     /**
+     * 预加载当前语言所有翻译到内存 + 持久缓存
+     * 采用整体预加载策略：一次查询取回所有翻译，避免 N+1 查询
+     */
+    private static function preload_translations() {
+        if (self::$persistent_cache_loaded) {
+            return;
+        }
+        self::$persistent_cache_loaded = true;
+
+        $current_lang = Fanyi2_Frontend::get_current_language();
+        $cache_key = 'fanyi2_all_' . $current_lang;
+
+        // 尝试从 wp_cache（object cache）读取
+        $cached = wp_cache_get($cache_key, self::$persistent_cache_group);
+        if (is_array($cached)) {
+            self::$gettext_cache = $cached;
+            return;
+        }
+
+        // 尝试从 transient 读取（无 object cache 时的后备）
+        $cached = get_transient($cache_key);
+        if (is_array($cached)) {
+            self::$gettext_cache = $cached;
+            wp_cache_set($cache_key, $cached, self::$persistent_cache_group, 3600);
+            return;
+        }
+
+        // 从数据库全量加载当前语言的翻译
+        global $wpdb;
+        $table_strings = $wpdb->prefix . Fanyi2_Database::TABLE_STRINGS;
+        $table_trans   = $wpdb->prefix . Fanyi2_Database::TABLE_TRANSLATIONS;
+
+        $results = $wpdb->get_results($wpdb->prepare(
+            "SELECT s.string_hash, t.translated_string
+             FROM {$table_trans} t
+             INNER JOIN {$table_strings} s ON t.string_id = s.id
+             WHERE t.language = %s AND t.status = 'published' AND s.status = 'active'",
+            $current_lang
+        ));
+
+        $map = array();
+        foreach ($results as $row) {
+            $map[$row->string_hash] = $row->translated_string;
+        }
+
+        self::$gettext_cache = $map;
+
+        // 写入持久缓存（5分钟）
+        wp_cache_set($cache_key, $map, self::$persistent_cache_group, 300);
+        set_transient($cache_key, $map, 300);
+    }
+
+    /**
+     * 清除翻译缓存（翻译保存/删除后调用）
+     */
+    public static function clear_translation_cache($lang = '') {
+        if ($lang) {
+            $cache_key = 'fanyi2_all_' . $lang;
+            wp_cache_delete($cache_key, self::$persistent_cache_group);
+            delete_transient($cache_key);
+        } else {
+            // 清除所有语言
+            $languages = get_option('fanyi2_enabled_languages', array());
+            foreach ($languages as $l) {
+                $cache_key = 'fanyi2_all_' . $l;
+                wp_cache_delete($cache_key, self::$persistent_cache_group);
+                delete_transient($cache_key);
+            }
+        }
+        self::$gettext_cache = array();
+        self::$persistent_cache_loaded = false;
+    }
+
+    /**
      * 查询数据库翻译，命中则返回翻译文本
+     * 优化：先预加载所有翻译到内存，然后通过哈希查找，O(1) 复杂度
      */
     private static function maybe_translate($text) {
         if (empty($text) || mb_strlen($text) < 2) {
             return $text;
         }
 
-        $current_lang = Fanyi2_Frontend::get_current_language();
+        // 确保翻译已预加载
+        self::preload_translations();
 
-        // 内存缓存
-        $cache_key = md5($text . '|' . $current_lang);
-        if (isset(self::$gettext_cache[$cache_key])) {
-            return self::$gettext_cache[$cache_key];
+        // 通过哈希快速查找
+        $hash = md5($text);
+        if (isset(self::$gettext_cache[$hash])) {
+            return self::$gettext_cache[$hash];
         }
 
-        $translation = Fanyi2_Database::get_translation($text, $current_lang);
-        if ($translation) {
-            self::$gettext_cache[$cache_key] = $translation;
-            return $translation;
-        }
-
-        // 标记未命中，避免重复查询
-        self::$gettext_cache[$cache_key] = $text;
+        // 未命中：没有这条翻译
         return $text;
     }
 
@@ -299,6 +372,13 @@ class Fanyi2_Translator {
 
         // 同样保护 minimal 样式切换器的 <select>
         $html = preg_replace_callback('/<select\b[^>]*fanyi2-switcher-select[^>]*>.*?<\/select>/is', function($m) use (&$protected_links) {
+            $key = '<!--FANYI2_PROT_' . count($protected_links) . '-->';
+            $protected_links[$key] = $m[0];
+            return $key;
+        }, $html);
+
+        // 保护 hreflang 标签：各语言的 alternate 链接不应被重写为当前语言
+        $html = preg_replace_callback('/<link\b[^>]*hreflang=["\'][^"\']*["\'][^>]*\/?>/is', function($m) use (&$protected_links) {
             $key = '<!--FANYI2_PROT_' . count($protected_links) . '-->';
             $protected_links[$key] = $m[0];
             return $key;
@@ -463,25 +543,54 @@ class Fanyi2_Translator {
 
     /**
      * 翻译HTML内容
+     * 优化：使用预加载缓存 + 单次扫描替换，防止链式替换
      */
     public static function translate_html($html, $target_language) {
+        // 确保翻译已预加载
+        self::preload_translations();
+
         // 提取所有文本内容
         $text_nodes = self::extract_text_from_html($html);
-        
+
         if (empty($text_nodes)) {
             return $html;
         }
 
-        // 批量获取翻译
-        $translations = Fanyi2_Database::get_translations_batch($text_nodes, $target_language);
-
-        // 替换翻译
-        foreach ($translations as $original => $translated) {
-            if (!empty($translated) && $original !== $translated) {
-                // 使用精确匹配替换，避免破坏HTML标签
-                $html = self::safe_replace($html, $original, $translated);
+        // 从预加载缓存中收集需要替换的映射
+        $replacements = array();
+        $missed_texts = array();
+        foreach ($text_nodes as $text) {
+            $hash = md5($text);
+            if (isset(self::$gettext_cache[$hash])) {
+                $translated = self::$gettext_cache[$hash];
+                if ($translated !== $text) {
+                    $replacements[$text] = $translated;
+                }
+            } else {
+                $missed_texts[] = $text;
             }
         }
+
+        // 缓存没命中的部分，补一次批量数据库查询
+        if (!empty($missed_texts)) {
+            $db_trans = Fanyi2_Database::get_translations_batch($missed_texts, $target_language);
+            foreach ($db_trans as $original => $translated) {
+                if (!empty($translated) && $original !== $translated) {
+                    $replacements[$original] = $translated;
+                }
+            }
+        }
+
+        if (empty($replacements)) {
+            return $html;
+        }
+
+        // 按原文长度降序排列，防止短文本先匹配导致长文本断裂
+        uksort($replacements, function($a, $b) {
+            return mb_strlen($b) - mb_strlen($a);
+        });
+
+        $html = self::safe_replace_batch($html, $replacements);
 
         return $html;
     }
@@ -521,25 +630,70 @@ class Fanyi2_Translator {
     }
 
     /**
-     * 安全替换文本，避免破坏HTML标签
+     * 安全替换文本，避免破坏HTML标签（单条兼容接口）
      */
     private static function safe_replace($html, $original, $translated) {
-        // 只替换标签之间的文本内容
-        $escaped_original = preg_quote($original, '/');
+        return self::safe_replace_batch($html, array($original => $translated));
+    }
 
-        // 替换标签内文本
-        $html = preg_replace(
-            '/(>)(' . $escaped_original . ')(<)/',
-            '${1}' . str_replace('$', '\\$', $translated) . '${3}',
-            $html
-        );
+    /**
+     * 批量安全替换：使用占位符机制防止链式替换
+     *
+     * 问题场景：翻译A的结果恰好包含原文B，逐条替换时B的规则会破坏A的译文。
+     * 解决：阶段1 将所有原文替换为唯一占位符（\x00 打头，HTML 中不会出现），
+     *       阶段2 一次性将占位符替换为最终译文。
+     *
+     * @param string $html          HTML 内容
+     * @param array  $replacements  原文 => 译文 映射（应已按长度降序排序）
+     * @return string
+     */
+    private static function safe_replace_batch($html, array $replacements) {
+        if (empty($replacements)) {
+            return $html;
+        }
 
-        // 替换属性中的文本
-        $html = preg_replace(
-            '/((?:content|title|alt|placeholder)=["\'])(' . $escaped_original . ')(["\'])/',
-            '${1}' . str_replace('$', '\\$', $translated) . '${3}',
-            $html
-        );
+        // 阶段1：将所有匹配的原文替换为唯一占位符
+        $placeholders = array(); // placeholder => translated
+        $index = 0;
+
+        foreach ($replacements as $original => $translated) {
+            $escaped = preg_quote($original, '/');
+            $ph_tag  = "\x00FANYI2_PH_{$index}_TAG\x00";
+            $ph_attr = "\x00FANYI2_PH_{$index}_ATTR\x00";
+
+            // 替换标签间文本 >原文<
+            $new_html = preg_replace(
+                '/(>)(' . $escaped . ')(<)/',
+                '${1}' . $ph_tag . '${3}',
+                $html
+            );
+            if ($new_html !== null) {
+                $html = $new_html;
+            }
+
+            // 替换属性中的文本
+            $new_html = preg_replace(
+                '/((?:content|title|alt|placeholder)=["\'])(' . $escaped . ')(["\'])/',
+                '${1}' . $ph_attr . '${3}',
+                $html
+            );
+            if ($new_html !== null) {
+                $html = $new_html;
+            }
+
+            $placeholders[$ph_tag]  = $translated;
+            $placeholders[$ph_attr] = $translated;
+            $index++;
+        }
+
+        // 阶段2：将所有占位符一次性替换为最终译文
+        if (!empty($placeholders)) {
+            $html = str_replace(
+                array_keys($placeholders),
+                array_values($placeholders),
+                $html
+            );
+        }
 
         return $html;
     }

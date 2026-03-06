@@ -244,6 +244,13 @@ final class Fanyi2 {
                 }
                 return Fanyi2_Frontend::get_language_url($detected_lang, $redirect_url);
             }, 10, 1);
+        } else {
+            // 无语言前缀 = 默认语言，必须重置 cookie
+            // 避免上一次非默认语言页面留下的 cookie 导致语言"粘滞"
+            if (isset($_COOKIE['fanyi2_language']) && $_COOKIE['fanyi2_language'] !== $default_lang) {
+                setcookie('fanyi2_language', $default_lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
+            }
+            $_COOKIE['fanyi2_language'] = $default_lang;
         }
     }
 

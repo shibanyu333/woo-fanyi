@@ -28,19 +28,8 @@
                 $(this).closest('.fanyi2-switcher').toggleClass('open');
             });
 
-            // 语言选择 (dropdown样式)
-            $(document).on('click', '.fanyi2-lang-option', function(e) {
-                e.preventDefault();
-                var lang = $(this).data('lang');
-                Fanyi2Frontend.switchLanguage(lang);
-            });
-
-            // 语言选择 (flags样式)
-            $(document).on('click', '.fanyi2-flag-option', function(e) {
-                e.preventDefault();
-                var lang = $(this).data('lang');
-                Fanyi2Frontend.switchLanguage(lang);
-            });
+            // 语言选项链接已有真实 URL + data-fanyi2-lang，
+            // 点击后直接由浏览器导航，无需 JS 拦截或 AJAX
 
             // 点击外部关闭
             $(document).on('click', function() {
@@ -55,26 +44,12 @@
             $('.fanyi2-lang-option[data-lang="' + currentLang + '"]').addClass('active');
         },
 
+        /**
+         * 程序化切换语言（供外部调用）
+         * 内置切换器已使用真实 URL，此方法仅作为公开 API 保留
+         */
         switchLanguage: function(lang) {
-            // AJAX切换语言（设置cookie）
-            $.ajax({
-                url: fanyi2_vars.ajax_url,
-                type: 'POST',
-                data: {
-                    action: 'fanyi2_switch_language',
-                    nonce: fanyi2_vars.nonce,
-                    language: lang
-                },
-                success: function(response) {
-                    if (response.success) {
-                        Fanyi2Frontend.redirectToLanguage(lang);
-                    }
-                },
-                error: function() {
-                    // 降级：直接跳转
-                    Fanyi2Frontend.redirectToLanguage(lang);
-                }
-            });
+            Fanyi2Frontend.redirectToLanguage(lang);
         },
 
         /**
