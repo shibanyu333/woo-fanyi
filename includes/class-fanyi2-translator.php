@@ -21,16 +21,11 @@ class Fanyi2_Translator {
     private static $persistent_cache_group = 'fanyi2_trans';
 
     /**
-     * 初始化
+     * 初始化（保留供外部调用；输出缓冲已由 Fanyi2_Frontend::start_translation_buffer 启动）
      */
     public static function init() {
-        $current_lang = Fanyi2_Frontend::get_current_language();
-        $default_lang = get_option('fanyi2_default_language', 'zh');
-
-        if ($current_lang !== $default_lang) {
-            // 使用输出缓冲来替换翻译
-            add_action('template_redirect', array(__CLASS__, 'start_output_buffer'), 0);
-        }
+        // 注意：当前版本中输出缓冲由 Fanyi2_Frontend::start_translation_buffer() 注册，
+        // 此方法不再需要额外注册。保留以兼容可能的外部代码调用。
     }
 
     /**
@@ -615,8 +610,8 @@ class Fanyi2_Translator {
             }
         }
 
-        // 提取meta描述和title等属性中的文本
-        preg_match_all('/(?:content|title|alt|placeholder|value)=["\']([^"\']+)["\']/', $html, $attr_matches);
+        // 提取meta描述和title等属性中的文本（不含 value，避免翻译表单值）
+        preg_match_all('/(?:content|title|alt|placeholder)=["\']([^"\']+)["\']/', $html, $attr_matches);
         if (!empty($attr_matches[1])) {
             foreach ($attr_matches[1] as $text) {
                 $text = trim($text);
@@ -661,9 +656,9 @@ class Fanyi2_Translator {
             $ph_tag  = "\x00FANYI2_PH_{$index}_TAG\x00";
             $ph_attr = "\x00FANYI2_PH_{$index}_ATTR\x00";
 
-            // 替换标签间文本 >原文<
+            // 替换标签间文本 >原文<（允许两侧有空白）
             $new_html = preg_replace(
-                '/(>)(' . $escaped . ')(<)/',
+                '/(>\s*)(' . $escaped . ')(\s*<)/',
                 '${1}' . $ph_tag . '${3}',
                 $html
             );

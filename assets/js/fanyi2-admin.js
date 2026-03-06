@@ -595,7 +595,7 @@
         },
 
         /**
-         * 弹窗中AI翻译
+         * 弹窗中AI翻译（逐语言顺序执行，避免并发竞态）
          */
         modalAiTranslate: function() {
             var original = $('#fanyi2-modal-original').val();
@@ -606,11 +606,19 @@
 
             // 获取所有目标语言输入框
             var $langInputs = $('#fanyi2-modal-translations .fanyi2-modal-lang-input');
-            
-            $langInputs.each(function() {
-                var $input = $(this);
+            var inputs = $langInputs.toArray();
+            var idx = 0;
+
+            function translateNext() {
+                if (idx >= inputs.length) {
+                    $btn.prop('disabled', false).text('🤖 AI翻译所有');
+                    return;
+                }
+                var $input = $(inputs[idx]);
                 var lang = $input.data('lang');
-                
+                idx++;
+                $btn.text('⏳ ' + lang + ' (' + idx + '/' + inputs.length + ')');
+
                 $.ajax({
                     url: fanyi2_admin.ajax_url,
                     type: 'POST',
@@ -624,10 +632,14 @@
                         if (response.success) {
                             $input.val(response.data.translated);
                         }
-                        $btn.prop('disabled', false).text('🤖 AI翻译所有');
+                        translateNext();
+                    },
+                    error: function() {
+                        translateNext();
                     }
                 });
-            });
+            }
+            translateNext();
         },
 
         /**
@@ -690,7 +702,8 @@
                 'error': 'notice-error',
                 'info': 'notice-info'
             };
-            var $notice = $('<div class="notice ' + classMap[type] + ' is-dismissible"><p>' + message + '</p></div>');
+            var $notice = $('<div class="notice ' + classMap[type] + ' is-dismissible"><p></p></div>');
+            $notice.find('p').text(message);
             
             // 移除旧通知
             $('.fanyi2-admin-wrap .notice.is-dismissible').not('.below-h2').remove();

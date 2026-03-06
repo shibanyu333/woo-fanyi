@@ -35,7 +35,7 @@ class Fanyi2_Database {
             created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
             updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
             PRIMARY KEY (id),
-            KEY string_hash (string_hash),
+            UNIQUE KEY string_hash (string_hash),
             KEY domain (domain),
             KEY page_url (page_url(191)),
             KEY status (status)
@@ -94,20 +94,18 @@ class Fanyi2_Database {
             return $existing;
         }
 
-        // 创建新字符串
-        $wpdb->insert($table, array(
-            'original_string' => $original_string,
-            'string_hash'     => $string_hash,
-            'domain'          => $args['domain'],
-            'context'         => $args['context'],
-            'page_url'        => $args['page_url'],
-            'element_type'    => $args['element_type'],
-            'selector'        => $args['selector'],
+        // 创建新字符串（使用 INSERT IGNORE 防止并发重复插入）
+        $wpdb->query($wpdb->prepare(
+            "INSERT IGNORE INTO $table (original_string, string_hash, domain, context, page_url, element_type, selector)
+             VALUES (%s, %s, %s, %s, %s, %s, %s)",
+            $original_string, $string_hash, $args['domain'], $args['context'],
+            $args['page_url'], $args['element_type'], $args['selector']
         ));
 
+        // 无论是刚插入还是已存在，通过 hash 查找返回
         return $wpdb->get_row($wpdb->prepare(
-            "SELECT * FROM $table WHERE id = %d",
-            $wpdb->insert_id
+            "SELECT * FROM $table WHERE string_hash = %s LIMIT 1",
+            $string_hash
         ));
     }
 
@@ -256,8 +254,6 @@ class Fanyi2_Database {
 
         $where = array("1=1");
         $params = array();
-        $having = array();
-
         if (!empty($args['search'])) {
             $where[] = "s.original_string LIKE %s";
             $params[] = '%' . $wpdb->esc_like($args['search']) . '%';

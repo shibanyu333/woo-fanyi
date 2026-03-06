@@ -206,7 +206,7 @@
             $('#fanyi2-table-copy-all').on('click', function() {
                 var lines = [];
                 $('#fanyi2-edit-table tbody tr').each(function() {
-                    var text = $(this).find('.fanyi2-cell-original').text().trim();
+                    var text = $(this).find('.fanyi2-cell-text').text().trim();
                     if (text) lines.push(text);
                 });
                 if (!lines.length) {

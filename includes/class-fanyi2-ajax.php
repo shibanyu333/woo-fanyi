@@ -531,9 +531,17 @@ class Fanyi2_Ajax {
         );
 
         foreach ($settings as $key => $value) {
-            if (in_array($key, $allowed_options)) {
-                update_option(sanitize_text_field($key), $value);
+            if (!in_array($key, $allowed_options)) {
+                continue;
             }
+            $clean_key = sanitize_text_field($key);
+            if (is_array($value)) {
+                // 数组值（如 enabled_languages）逐项清理
+                $value = array_map('sanitize_text_field', $value);
+            } else {
+                $value = sanitize_text_field($value);
+            }
+            update_option($clean_key, $value);
         }
 
         // URL模式变更时标记需要刷新重写规则（延迟到下一次 init，让新规则先注册）

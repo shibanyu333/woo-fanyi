@@ -3,7 +3,7 @@
  * Plugin Name: Fanyi2 - AI 智能翻译
  * Plugin URI: https://github.com/fanyi2
  * Description: 类似TranslatePress的WordPress多语言翻译插件，支持前端可视化翻译、DeepSeek/千问AI翻译、浏览器语言自动切换、兼容woo-huilv汇率插件
- * Version: 1.0.0
+ * Version: 2.0.0
  * Author: Fanyi2
  * Author URI: https://github.com/fanyi2
  * License: GPL v2 or later
