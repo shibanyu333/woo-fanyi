@@ -611,7 +611,8 @@ class Fanyi2_Translator {
         }
 
         // 提取meta描述和title等属性中的文本（不含 value，避免翻译表单值）
-        preg_match_all('/(?:content|title|alt|placeholder)=["\']([^"\']+)["\']/', $html, $attr_matches);
+        // 使用 \b 确保只匹配完整属性名，防止误匹配 data-title, data-thumb-alt 等
+        preg_match_all('/\b(?:content|title|alt|placeholder)=["\']([^"\']+)["\']/', $html, $attr_matches);
         if (!empty($attr_matches[1])) {
             foreach ($attr_matches[1] as $text) {
                 $text = trim($text);
@@ -666,9 +667,9 @@ class Fanyi2_Translator {
                 $html = $new_html;
             }
 
-            // 替换属性中的文本
+            // 替换属性中的文本（\b 防止误匹配 data-title, data-thumb-alt 等）
             $new_html = preg_replace(
-                '/((?:content|title|alt|placeholder)=["\'])(' . $escaped . ')(["\'])/',
+                '/(\b(?:content|title|alt|placeholder)=["\'])(' . $escaped . ')(["\'])/',
                 '${1}' . $ph_attr . '${3}',
                 $html
             );

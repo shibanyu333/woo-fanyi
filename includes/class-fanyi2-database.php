@@ -444,4 +444,21 @@ class Fanyi2_Database {
 
         return $results;
     }
+
+    /**
+     * 获取未翻译字符串的总数（轻量 COUNT 查询）
+     */
+    public static function count_untranslated_strings($language) {
+        global $wpdb;
+
+        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM $table_strings s
+             LEFT JOIN $table_trans t ON s.id = t.string_id AND t.language = %s
+             WHERE s.status = 'active' AND t.id IS NULL",
+            $language
+        ));
+    }
 }

@@ -353,8 +353,8 @@ class Fanyi2_Ajax {
         // 清除该语言的翻译缓存
         Fanyi2_Translator::clear_translation_cache($language);
 
-        // 获取剩余未翻译数量
-        $remaining = count(Fanyi2_Database::get_untranslated_strings($language, 1));
+        // 获取剩余未翻译数量（使用 COUNT 查询，而非 LIMIT 1 后 count 数组）
+        $remaining = Fanyi2_Database::count_untranslated_strings($language);
 
         wp_send_json_success(array(
             'translated' => $saved,

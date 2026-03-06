@@ -30,6 +30,10 @@ class Fanyi2_Frontend {
 
         // 注册 WooCommerce 专用翻译钩子
         add_action('wp', array('Fanyi2_Translator', 'register_wc_hooks'));
+
+        // RTL 语言修正：让 WooCommerce Flexslider 及画廊在 RTL 模式下正常工作
+        add_filter('woocommerce_single_product_carousel_options', array(__CLASS__, 'fix_gallery_rtl'));
+        add_action('wp_enqueue_scripts', array(__CLASS__, 'maybe_enqueue_rtl_fix'), 99);
     }
 
     /**
@@ -508,6 +512,65 @@ class Fanyi2_Frontend {
             'hi' => '🇮🇳',
             'bn' => '🇧🇩',
         );
+    }
+
+    /**
+     * 修正 WooCommerce 产品画廊 Flexslider 在 RTL 语言下的方向
+     */
+    public static function fix_gallery_rtl($options) {
+        $current_lang = self::get_current_language();
+        $rtl_languages = Fanyi2_IP_Detector::get_rtl_languages();
+        if (in_array($current_lang, $rtl_languages)) {
+            $options['rtl'] = true;
+        }
+        return $options;
+    }
+
+    /**
+     * RTL 语言下注入画廊保护 CSS，防止图片被 direction:rtl 破坏
+     */
+    public static function maybe_enqueue_rtl_fix() {
+        $current_lang = self::get_current_language();
+        $rtl_languages = Fanyi2_IP_Detector::get_rtl_languages();
+        if (!in_array($current_lang, $rtl_languages)) {
+            return;
+        }
+        $css = '
+            /* Fanyi2 RTL 画廊修复 */
+            [dir="rtl"] .woocommerce-product-gallery,
+            [dir="rtl"] .woocommerce-product-gallery__wrapper,
+            [dir="rtl"] .woocommerce-product-gallery__image,
+            [dir="rtl"] .flex-viewport,
+            [dir="rtl"] .flex-control-thumbs,
+            [dir="rtl"] .flex-direction-nav,
+            [dir="rtl"] .woocommerce-product-gallery .flex-control-thumbs li {
+                direction: ltr !important;
+            }
+            /* 确保画廊滑块不溢出隐藏 */
+            [dir="rtl"] .flex-viewport { overflow: hidden; }
+            [dir="rtl"] .woocommerce-product-gallery__wrapper {
+                display: flex;
+                flex-direction: row;
+            }
+            /* PhotoSwipe 灯箱修正 */
+            [dir="rtl"] .pswp,
+            [dir="rtl"] .pswp__container,
+            [dir="rtl"] .pswp__item {
+                direction: ltr !important;
+            }
+            /* 通用图片容器保护 */
+            [dir="rtl"] .gallery,
+            [dir="rtl"] .wp-block-gallery,
+            [dir="rtl"] .wp-block-image,
+            [dir="rtl"] .tiled-gallery,
+            [dir="rtl"] .swiper,
+            [dir="rtl"] .swiper-wrapper,
+            [dir="rtl"] .slick-slider,
+            [dir="rtl"] .slick-list {
+                direction: ltr !important;
+            }
+        ';
+        wp_add_inline_style('fanyi2-frontend', $css);
     }
 
     /**

@@ -1,0 +1,25 @@
+services:
+  mail-query-app:
+    build: .
+    container_name: mail-query-app
+    ports:
+      - "8099:8099"
+    environment:
+      APP_TIMEZONE: Asia/Shanghai
+      APP_BASE_URL: http://localhost:8099
+      APP_ADMIN_PASSWORD: admin123456
+      APP_IMAP_HOST: imap.qq.com
+      APP_IMAP_PORT: 993
+      APP_IMAP_ENCRYPTION: ssl
+      APP_IMAP_MAILBOX: INBOX
+      APP_IMAP_EMAIL: ""
+      APP_IMAP_PASSWORD: okzuiqldtkzsifia
+      APP_SENDER_DOMAINS: netflix.com,account.netflix.com,mailer.netflix.com
+      APP_SUBJECT_INCLUDES: ""
+      APP_SUBJECT_EXCLUDES: ""
+      APP_RECENT_HOURS: 24
+      APP_MAX_RESULTS: 10
+      APP_DEFAULT_EXPIRY_HOURS: 72
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
