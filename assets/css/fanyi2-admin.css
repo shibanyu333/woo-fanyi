@@ -175,6 +175,15 @@
     border-color: #2271b1;
 }
 
+.fanyi2-language-display-table th,
+.fanyi2-language-display-table td {
+    vertical-align: middle;
+}
+
+.fanyi2-language-display-table .small-text {
+    width: 72px;
+}
+
 /* 单选组 */
 .fanyi2-radio-group label {
     display: block;

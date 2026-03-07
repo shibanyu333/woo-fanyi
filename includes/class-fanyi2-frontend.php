@@ -202,12 +202,18 @@ class Fanyi2_Frontend {
                 <div class="fanyi2-switcher-flags">
                     <?php foreach ($enabled_languages as $lang):
                         $url = self::get_language_url($lang);
+                        $lang_name = $language_names[$lang] ?? $lang;
+                        $lang_flag = $language_flags[$lang] ?? '';
                     ?>
                         <a href="<?php echo esc_url($url); ?>" class="fanyi2-flag-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
                            data-lang="<?php echo esc_attr($lang); ?>"
                            data-fanyi2-lang="<?php echo esc_attr($lang); ?>"
-                           title="<?php echo esc_html($language_names[$lang] ?? $lang); ?>">
-                            <span class="fanyi2-flag"><?php echo esc_html($language_flags[$lang] ?? '🌐'); ?></span>
+                           title="<?php echo esc_attr($lang_name); ?>">
+                            <?php if ($lang_flag !== ''): ?>
+                                <span class="fanyi2-flag"><?php echo esc_html($lang_flag); ?></span>
+                            <?php else: ?>
+                                <span class="fanyi2-flag"><?php echo esc_html($lang_name); ?></span>
+                            <?php endif; ?>
                         </a>
                     <?php endforeach; ?>
                 </div>
@@ -215,26 +221,33 @@ class Fanyi2_Frontend {
                 <select class="fanyi2-switcher-select" onchange="if(this.value)location.href=this.value">
                     <?php foreach ($enabled_languages as $lang):
                         $url = self::get_language_url($lang);
+                        $lang_name = $language_names[$lang] ?? $lang;
+                        $lang_flag = $language_flags[$lang] ?? '';
                     ?>
                         <option value="<?php echo esc_url($url); ?>" <?php selected($lang, $current_language); ?>>
-                            <?php echo esc_html(($language_flags[$lang] ?? '') . ' ' . ($language_names[$lang] ?? $lang)); ?>
+                            <?php echo esc_html(trim(($lang_flag !== '' ? $lang_flag . ' ' : '') . $lang_name)); ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
             <?php else: /* dropdown */ ?>
                 <div class="fanyi2-switcher-current">
-                    <span class="fanyi2-flag"><?php echo esc_html($language_flags[$current_language] ?? '🌐'); ?></span>
+                    <?php if (!empty($language_flags[$current_language])): ?>
+                        <span class="fanyi2-flag"><?php echo esc_html($language_flags[$current_language]); ?></span>
+                    <?php endif; ?>
                     <span class="fanyi2-lang-name"><?php echo esc_html($language_names[$current_language] ?? $current_language); ?></span>
                     <span class="fanyi2-arrow">▼</span>
                 </div>
                 <div class="fanyi2-switcher-dropdown">
                     <?php foreach ($enabled_languages as $lang):
                         $url = self::get_language_url($lang);
+                        $lang_flag = $language_flags[$lang] ?? '';
                     ?>
                         <a href="<?php echo esc_url($url); ?>" class="fanyi2-lang-option <?php echo $lang === $current_language ? 'active' : ''; ?>"
                            data-lang="<?php echo esc_attr($lang); ?>"
                            data-fanyi2-lang="<?php echo esc_attr($lang); ?>">
-                            <span class="fanyi2-flag"><?php echo esc_html($language_flags[$lang] ?? '🌐'); ?></span>
+                            <?php if ($lang_flag !== ''): ?>
+                                <span class="fanyi2-flag"><?php echo esc_html($lang_flag); ?></span>
+                            <?php endif; ?>
                             <span><?php echo esc_html($language_names[$lang] ?? $lang); ?></span>
                         </a>
                     <?php endforeach; ?>
@@ -446,6 +459,25 @@ class Fanyi2_Frontend {
      * 获取语言名称
      */
     public static function get_language_names() {
+        $names = self::get_default_language_names();
+        $custom_names = get_option('fanyi2_language_custom_names', array());
+
+        if (is_array($custom_names)) {
+            foreach ($custom_names as $lang => $custom_name) {
+                $custom_name = trim((string) $custom_name);
+                if ($custom_name !== '') {
+                    $names[$lang] = $custom_name;
+                }
+            }
+        }
+
+        return $names;
+    }
+
+    /**
+     * 获取默认语言名称
+     */
+    public static function get_default_language_names() {
         return array(
             'zh' => '中文',
             'hk' => '繁體中文（香港）',
@@ -484,6 +516,32 @@ class Fanyi2_Frontend {
      * 获取语言旗帜emoji
      */
     public static function get_language_flags() {
+        $flags = self::get_default_language_flags();
+        $custom_flags = get_option('fanyi2_language_custom_flags', array());
+        $hidden_flags = get_option('fanyi2_hidden_language_flags', array());
+
+        if (is_array($custom_flags)) {
+            foreach ($custom_flags as $lang => $custom_flag) {
+                $custom_flag = trim((string) $custom_flag);
+                if ($custom_flag !== '') {
+                    $flags[$lang] = $custom_flag;
+                }
+            }
+        }
+
+        if (is_array($hidden_flags)) {
+            foreach ($hidden_flags as $lang) {
+                $flags[$lang] = '';
+            }
+        }
+
+        return $flags;
+    }
+
+    /**
+     * 获取默认语言旗帜 emoji
+     */
+    public static function get_default_language_flags() {
         return array(
             'zh' => '🇨🇳',
             'hk' => '🇭🇰',
@@ -689,7 +747,7 @@ class Fanyi2_Frontend {
             $active_class = ($lang === $current_language) ? ' current-menu-item current-lang' : '';
             $submenu_items .= '<li class="menu-item fanyi2-menu-lang-item' . $active_class . '">';
             $submenu_items .= '<a href="' . esc_url($url) . '" data-fanyi2-lang="' . esc_attr($lang) . '">';
-            $submenu_items .= $flag . ' ' . esc_html($lang_name);
+            $submenu_items .= esc_html(trim(($flag !== '' ? $flag . ' ' : '') . $lang_name));
             $submenu_items .= '</a></li>';
         }
 

@@ -505,6 +505,9 @@ class Fanyi2_Ajax {
         $allowed_options = array(
             'fanyi2_default_language',
             'fanyi2_enabled_languages',
+            'fanyi2_language_custom_names',
+            'fanyi2_language_custom_flags',
+            'fanyi2_hidden_language_flags',
             'fanyi2_ai_engine',
             'fanyi2_deepseek_api_key',
             'fanyi2_deepseek_model',

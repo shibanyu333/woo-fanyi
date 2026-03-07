@@ -466,6 +466,11 @@ class Fanyi2_Admin {
         $enabled_languages = get_option('fanyi2_enabled_languages', array('zh', 'en'));
         $default_language = get_option('fanyi2_default_language', 'zh');
         $ai_engine = get_option('fanyi2_ai_engine', 'deepseek');
+        $custom_language_names = get_option('fanyi2_language_custom_names', array());
+        $custom_language_flags = get_option('fanyi2_language_custom_flags', array());
+        $hidden_language_flags = get_option('fanyi2_hidden_language_flags', array());
+        $default_language_flags = Fanyi2_Frontend::get_default_language_flags();
+        $languages_for_display = !empty($enabled_languages) ? $enabled_languages : array_keys($all_languages);
         ?>
         <div class="wrap fanyi2-admin-wrap">
             <h1>⚙️ Fanyi2 设置</h1>
@@ -504,6 +509,62 @@ class Fanyi2_Admin {
                                 </label>
                             <?php endforeach; ?>
                         </div>
+                    </div>
+
+                    <div class="fanyi2-card">
+                        <h2>语言显示自定义</h2>
+                        <p class="description">可为已启用语言自定义前台显示文字和国旗。留空则使用默认值；勾选“隐藏国旗”后会只显示文字。</p>
+                        <table class="widefat striped fanyi2-language-display-table">
+                            <thead>
+                                <tr>
+                                    <th>语言</th>
+                                    <th>自定义显示文字</th>
+                                    <th>自定义国旗/图标</th>
+                                    <th>隐藏国旗</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($languages_for_display as $code):
+                                    $name = $all_languages[$code] ?? $code;
+                                    $default_flag = $default_language_flags[$code] ?? '';
+                                    $custom_name = $custom_language_names[$code] ?? '';
+                                    $custom_flag = $custom_language_flags[$code] ?? '';
+                                    $hide_flag = in_array($code, $hidden_language_flags, true);
+                                ?>
+                                    <tr>
+                                        <td>
+                                            <strong><?php echo esc_html($name); ?></strong><br>
+                                            <span class="description"><?php echo esc_html($code); ?></span>
+                                        </td>
+                                        <td>
+                                            <input type="text"
+                                                   name="fanyi2_language_custom_names[<?php echo esc_attr($code); ?>]"
+                                                   value="<?php echo esc_attr($custom_name); ?>"
+                                                   class="regular-text"
+                                                   placeholder="默认：<?php echo esc_attr($name); ?>">
+                                        </td>
+                                        <td>
+                                            <input type="text"
+                                                   name="fanyi2_language_custom_flags[<?php echo esc_attr($code); ?>]"
+                                                   value="<?php echo esc_attr($custom_flag); ?>"
+                                                   class="small-text"
+                                                   placeholder="<?php echo esc_attr($default_flag); ?>">
+                                            <p class="description">可填 emoji、简写，如 cn、zh。</p>
+                                        </td>
+                                        <td>
+                                            <label>
+                                                <input type="checkbox"
+                                                       name="fanyi2_hidden_language_flags[]"
+                                                       value="<?php echo esc_attr($code); ?>"
+                                                       <?php checked($hide_flag); ?>>
+                                                不显示
+                                            </label>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                        <p class="description">提示：勾选“隐藏国旗”后，只会移除对应的 emoji，显示文字本身不变。</p>
                     </div>
                 </div>
 

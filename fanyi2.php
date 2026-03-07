@@ -120,6 +120,9 @@ final class Fanyi2 {
         $defaults = array(
             'fanyi2_default_language'  => 'zh',
             'fanyi2_enabled_languages' => array('zh', 'hk', 'tw', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'ar'),
+            'fanyi2_language_custom_names' => array(),
+            'fanyi2_language_custom_flags' => array(),
+            'fanyi2_hidden_language_flags' => array(),
             'fanyi2_ai_engine'         => 'deepseek',
             'fanyi2_deepseek_api_key'  => '',
             'fanyi2_deepseek_model'    => 'deepseek-chat',
