@@ -27,6 +27,40 @@ class Fanyi2_Currency {
      * @return string 本插件检测到的当前语言
      */
     public static function provide_current_language($lang) {
-        return Fanyi2_Frontend::get_current_language();
+        $current_lang = Fanyi2_Frontend::get_current_language();
+        $browser_locale = self::get_browser_locale();
+
+        if ($current_lang === 'en' && $browser_locale === 'en-gb') {
+            return 'en-gb';
+        }
+
+        return $current_lang;
+    }
+
+    /**
+     * 获取浏览器 locale（只保留语言-地区两段）
+     *
+     * @return string
+     */
+    private static function get_browser_locale() {
+        $accept_language = isset($_SERVER['HTTP_ACCEPT_LANGUAGE']) ? wp_unslash($_SERVER['HTTP_ACCEPT_LANGUAGE']) : '';
+        if (empty($accept_language)) {
+            return '';
+        }
+
+        $parts = explode(',', $accept_language);
+        if (empty($parts[0])) {
+            return '';
+        }
+
+        $locale = strtolower(trim($parts[0]));
+        $locale = preg_replace('/;q=[0-9.]+/i', '', $locale);
+        $locale = str_replace('_', '-', $locale);
+
+        if (!preg_match('/^[a-z]{2}(?:-[a-z]{2})?$/', $locale)) {
+            return '';
+        }
+
+        return $locale;
     }
 }

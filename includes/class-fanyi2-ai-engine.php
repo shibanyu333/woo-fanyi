@@ -255,6 +255,8 @@ class Fanyi2_AI_Engine {
     private static function get_google_lang_code($code) {
         $map = array(
             'zh' => 'zh-CN',
+            'hk' => 'zh-TW',
+            'tw' => 'zh-TW',
         );
         return isset($map[$code]) ? $map[$code] : $code;
     }
@@ -494,6 +496,8 @@ class Fanyi2_AI_Engine {
     private static function get_language_full_names() {
         return array(
             'zh' => 'Chinese (Simplified)',
+            'hk' => 'Chinese (Traditional, Hong Kong)',
+            'tw' => 'Chinese (Traditional, Taiwan)',
             'en' => 'English',
             'ja' => 'Japanese',
             'ko' => 'Korean',

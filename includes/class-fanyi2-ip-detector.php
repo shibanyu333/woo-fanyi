@@ -29,6 +29,16 @@ class Fanyi2_IP_Detector {
         foreach ($browser_langs as $lang_info) {
             $code = strtolower($lang_info['code']);
 
+            $regional_map = array(
+                'zh-hk' => 'hk',
+                'zh-mo' => 'hk',
+                'zh-tw' => 'tw',
+            );
+
+            if (isset($regional_map[$code]) && in_array($regional_map[$code], $enabled)) {
+                return $regional_map[$code];
+            }
+
             // 精确匹配 (如 zh, en, ja)
             if (in_array($code, $enabled)) {
                 return $code;

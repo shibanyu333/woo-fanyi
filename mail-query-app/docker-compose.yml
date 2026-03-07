@@ -21,5 +21,8 @@ services:
       APP_MAX_RESULTS: 10
       APP_DEFAULT_EXPIRY_HOURS: 72
     volumes:
-      - ./data:/app/data
+      - /home/shibanyu/projects/NETFLIXmail:/app/data
+    dns:
+      - 223.5.5.5
+      - 1.1.1.1
     restart: unless-stopped

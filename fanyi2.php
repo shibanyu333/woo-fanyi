@@ -119,7 +119,7 @@ final class Fanyi2 {
     private function set_default_options() {
         $defaults = array(
             'fanyi2_default_language'  => 'zh',
-            'fanyi2_enabled_languages' => array('zh', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'ar'),
+            'fanyi2_enabled_languages' => array('zh', 'hk', 'tw', 'en', 'ja', 'ko', 'fr', 'de', 'es', 'ru', 'ar'),
             'fanyi2_ai_engine'         => 'deepseek',
             'fanyi2_deepseek_api_key'  => '',
             'fanyi2_deepseek_model'    => 'deepseek-chat',
@@ -370,6 +370,8 @@ final class Fanyi2 {
     public static function get_supported_languages() {
         return array(
             'zh' => '中文',
+            'hk' => '繁體中文（香港）',
+            'tw' => '繁體中文（台灣）',
             'en' => 'English',
             'ja' => '日本語',
             'ko' => '한국어',

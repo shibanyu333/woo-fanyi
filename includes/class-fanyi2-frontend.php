@@ -448,6 +448,8 @@ class Fanyi2_Frontend {
     public static function get_language_names() {
         return array(
             'zh' => '中文',
+            'hk' => '繁體中文（香港）',
+            'tw' => '繁體中文（台灣）',
             'en' => 'English',
             'ja' => '日本語',
             'ko' => '한국어',
@@ -484,6 +486,8 @@ class Fanyi2_Frontend {
     public static function get_language_flags() {
         return array(
             'zh' => '🇨🇳',
+            'hk' => '🇭🇰',
+            'tw' => '🇹🇼',
             'en' => '🇺🇸',
             'ja' => '🇯🇵',
             'ko' => '🇰🇷',

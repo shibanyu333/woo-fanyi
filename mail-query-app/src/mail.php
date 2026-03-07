@@ -32,15 +32,29 @@ function fetch_filtered_messages(string $targetEmail): array
     imap_timeout(IMAP_READTIMEOUT, 10);
     imap_timeout(IMAP_WRITETIMEOUT, 10);
 
+    // Clear previous IMAP runtime errors before opening a new connection.
+    imap_errors();
+    imap_alerts();
     $mailbox = @imap_open(imap_mailbox_string($settings), $imapEmail, $imapPassword, 0, 1);
     if (!$mailbox) {
-        return ['messages' => [], 'error' => 'IMAP 连接失败'];
+        $error = imap_last_error() ?: '未知错误';
+        return ['messages' => [], 'error' => 'IMAP 连接失败：' . $error];
     }
+
+    // Clear warnings generated during open stage before next IMAP calls.
+    imap_errors();
+    imap_alerts();
 
     $recentHours = max(1, (int) ($settings['recent_hours'] ?? 24));
     $maxResults = max(1, min(30, (int) ($settings['max_results'] ?? 10)));
     $sinceDate = date('d-M-Y', strtotime('-' . $recentHours . ' hours'));
     $uids = @imap_search($mailbox, 'SINCE "' . $sinceDate . '" TO "' . addcslashes($targetEmail, '"') . '"', SE_UID);
+    $searchErrors = imap_errors() ?: [];
+    if ($uids === false && $searchErrors) {
+        @imap_close($mailbox);
+        $error = (string) end($searchErrors);
+        return ['messages' => [], 'error' => 'IMAP 查询失败：' . $error];
+    }
     if (!$uids || !is_array($uids)) {
         @imap_close($mailbox);
         return ['messages' => []];
@@ -105,6 +119,8 @@ function fetch_filtered_messages(string $targetEmail): array
     }
 
     @imap_close($mailbox);
+    imap_errors();
+    imap_alerts();
     return ['messages' => $messages];
 }
 

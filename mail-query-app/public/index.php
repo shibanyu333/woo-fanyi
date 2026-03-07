@@ -174,7 +174,7 @@ function handle_links(string $method): void
             echo '<tr>';
             echo '<td>' . (int) $link['id'] . '</td>';
             echo '<td>' . h($link['email']) . '</td>';
-            echo '<td><input class="url-box" value="' . h($url) . '" readonly></td>';
+            echo '<td><div class="url-inline"><input class="url-box" value="' . h($url) . '" readonly><button type="button" class="copy-btn" data-copy="' . h($url) . '" onclick="copyLink(this)">复制</button></div></td>';
             echo '<td>' . h($link['expires_at']) . '</td>';
             echo '<td>' . h($status) . '</td>';
             echo '<td>' . h($link['note']) . '</td>';
@@ -270,7 +270,42 @@ function render_page(string $title, callable $content, bool $admin = true): void
         echo '<div class="alert ' . h($flash['type']) . '">' . h($flash['message']) . '</div>';
     }
     $content();
-    echo '</main></body></html>';
+    echo '</main>';
+    echo '<script>
+function copyLink(button){
+  var text = button.getAttribute("data-copy") || "";
+  if (!text) { return; }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function(){ setCopyState(button, true); }, function(){ fallbackCopy(button, text); });
+    return;
+  }
+  fallbackCopy(button, text);
+}
+function fallbackCopy(button, text){
+  var input = document.createElement("input");
+  input.value = text;
+  document.body.appendChild(input);
+  input.select();
+  try {
+    var ok = document.execCommand("copy");
+    setCopyState(button, ok);
+  } catch (e) {
+    setCopyState(button, false);
+  }
+  document.body.removeChild(input);
+}
+function setCopyState(button, ok){
+  var old = button.textContent;
+  button.textContent = ok ? "已复制" : "复制失败";
+  button.classList.add(ok ? "copy-ok" : "copy-fail");
+  setTimeout(function(){
+    button.textContent = old;
+    button.classList.remove("copy-ok");
+    button.classList.remove("copy-fail");
+  }, 1200);
+}
+</script>';
+    echo '</body></html>';
 }
 
 function admin_nav(string $current): string
@@ -314,5 +349,5 @@ function textarea_field(string $label, string $name, string $value, string $hint
 
 function base_css(): string
 {
-    return 'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6f8;color:#111827}a{color:#0f766e;text-decoration:none}.container{max-width:1200px;margin:0 auto;padding:24px}.topbar{display:flex;justify-content:space-between;align-items:center;background:#0f172a;color:#fff;padding:16px 24px}.hero,.panel{background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(15,23,42,.08);margin-bottom:20px}.hero{background:linear-gradient(135deg,#0f766e,#164e63);color:#fff}.panel.narrow{max-width:560px;margin:24px auto}.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.grid-form label,.grid-form .full{display:flex;flex-direction:column;gap:8px;font-weight:600}.grid-form .full{grid-column:1/-1}.form-actions{grid-column:1/-1}.tabs{display:flex;gap:12px;margin-bottom:16px}.tabs a{padding:10px 14px;border-radius:999px;background:#dbeafe;color:#1e3a8a}.tabs a.active{background:#0f766e;color:#fff}input,textarea,select,button{font:inherit;padding:12px 14px;border-radius:10px;border:1px solid #cbd5e1}button{background:#0f766e;color:#fff;border:none;cursor:pointer}button.danger{background:#b91c1c}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #e5e7eb;vertical-align:top}iframe{width:100%;min-height:420px;border:1px solid #e5e7eb;border-radius:12px;background:#fff}.meta{color:#475569}.alert{padding:14px 18px;border-radius:12px;margin-bottom:20px}.alert.success{background:#dcfce7;color:#166534}.alert.error{background:#fee2e2;color:#991b1b}.inline{display:flex;gap:8px}.url-box{min-width:320px;width:100%}small{font-weight:400;color:#64748b}@media(max-width:768px){.container{padding:16px}.inline{flex-direction:column}.url-box{min-width:0}}';
+    return 'body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#f4f6f8;color:#111827}a{color:#0f766e;text-decoration:none}.container{max-width:1200px;margin:0 auto;padding:24px}.topbar{display:flex;justify-content:space-between;align-items:center;background:#0f172a;color:#fff;padding:16px 24px}.hero,.panel{background:#fff;border-radius:16px;padding:24px;box-shadow:0 10px 30px rgba(15,23,42,.08);margin-bottom:20px}.hero{background:linear-gradient(135deg,#0f766e,#164e63);color:#fff}.panel.narrow{max-width:560px;margin:24px auto}.grid-form{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}.grid-form label,.grid-form .full{display:flex;flex-direction:column;gap:8px;font-weight:600}.grid-form .full{grid-column:1/-1}.form-actions{grid-column:1/-1}.tabs{display:flex;gap:12px;margin-bottom:16px}.tabs a{padding:10px 14px;border-radius:999px;background:#dbeafe;color:#1e3a8a}.tabs a.active{background:#0f766e;color:#fff}input,textarea,select,button{font:inherit;padding:12px 14px;border-radius:10px;border:1px solid #cbd5e1}button{background:#0f766e;color:#fff;border:none;cursor:pointer}button.danger{background:#b91c1c}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:12px;border-bottom:1px solid #e5e7eb;vertical-align:top}iframe{width:100%;min-height:420px;border:1px solid #e5e7eb;border-radius:12px;background:#fff}.meta{color:#475569}.alert{padding:14px 18px;border-radius:12px;margin-bottom:20px}.alert.success{background:#dcfce7;color:#166534}.alert.error{background:#fee2e2;color:#991b1b}.inline{display:flex;gap:8px}.url-inline{display:flex;gap:8px;align-items:center}.url-box{min-width:320px;width:100%}.copy-btn{white-space:nowrap}.copy-ok{background:#166534!important}.copy-fail{background:#b91c1c!important}small{font-weight:400;color:#64748b}@media(max-width:768px){.container{padding:16px}.inline,.url-inline{flex-direction:column}.url-box{min-width:0}.copy-btn{width:100%}}';
 }
