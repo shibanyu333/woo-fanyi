@@ -469,6 +469,9 @@ class Fanyi2_Admin {
         $custom_language_names = get_option('fanyi2_language_custom_names', array());
         $custom_language_flags = get_option('fanyi2_language_custom_flags', array());
         $hidden_language_flags = get_option('fanyi2_hidden_language_flags', array());
+        $country_language_map = get_option('fanyi2_country_language_map', array());
+        $continent_countries = Fanyi2_IP_Detector::get_countries_by_continent();
+        $continent_labels = Fanyi2_IP_Detector::get_continent_labels();
         $default_language_flags = Fanyi2_Frontend::get_default_language_flags();
         $languages_for_display = !empty($enabled_languages) ? $enabled_languages : array_keys($all_languages);
         ?>
@@ -880,7 +883,49 @@ class Fanyi2_Admin {
                                 根据访问者浏览器语言自动切换网站语言
                             </label>
                         </p>
-                        <p class="description">首次访问时根据浏览器语言偏好自动设置网站语言，用户可手动切换后记住偏好。</p>
+                        <p class="description">首次访问时按以下优先级自动切换：浏览器语言 &gt; 国家映射 &gt; 英文(en) &gt; 网站默认语言。用户手动切换后会记住偏好。</p>
+                    </div>
+
+                    <div class="fanyi2-card">
+                        <h2>国家映射（按洲）</h2>
+                        <p class="description">可将多个国家/地区映射到同一种语言（例如：中国、新加坡、马来西亚 → 简体中文）。当浏览器语言未命中启用语言时，将按国家映射进行跳转。</p>
+                        <p class="description">仅会跳转到“已启用语言”中的选项。留空表示该国家不做强制映射。</p>
+
+                        <?php foreach ($continent_countries as $continent_key => $countries): ?>
+                            <div style="margin:16px 0 12px; border-top:1px solid #e5e5e5; padding-top:12px;">
+                                <h3 style="margin:0 0 10px;"><?php echo esc_html($continent_labels[$continent_key] ?? $continent_key); ?></h3>
+                                <table class="widefat striped" style="max-width:1000px;">
+                                    <thead>
+                                        <tr>
+                                            <th style="width:40%;">国家/地区</th>
+                                            <th style="width:60%;">映射语言</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <?php foreach ($countries as $country_code => $country_name):
+                                            $mapped_lang = $country_language_map[$country_code] ?? '';
+                                        ?>
+                                            <tr>
+                                                <td>
+                                                    <strong><?php echo esc_html($country_name); ?></strong>
+                                                    <span class="description" style="margin-left:6px;"><?php echo esc_html($country_code); ?></span>
+                                                </td>
+                                                <td>
+                                                    <select name="fanyi2_country_language_map[<?php echo esc_attr($country_code); ?>]">
+                                                        <option value="">不映射</option>
+                                                        <?php foreach ($enabled_languages as $lang_code): ?>
+                                                            <option value="<?php echo esc_attr($lang_code); ?>" <?php selected($mapped_lang, $lang_code); ?>>
+                                                                <?php echo esc_html(($all_languages[$lang_code] ?? $lang_code) . ' (' . $lang_code . ')'); ?>
+                                                            </option>
+                                                        <?php endforeach; ?>
+                                                    </select>
+                                                </td>
+                                            </tr>
+                                        <?php endforeach; ?>
+                                    </tbody>
+                                </table>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
 
                     <div class="fanyi2-card">

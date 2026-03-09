@@ -21,6 +21,7 @@ class Fanyi2_Batch {
         // 2. 注册 WooCommerce 通用界面字符串
         if (class_exists('WooCommerce')) {
             $total_strings += self::register_woocommerce_strings();
+            $total_strings += self::register_woocommerce_dynamic_settings_strings();
         }
 
         return $total_strings;
@@ -191,8 +192,10 @@ class Fanyi2_Batch {
 
             foreach ($results as $string_id => $translated) {
                 if (!empty($translated)) {
-                    Fanyi2_Database::save_translation($string_id, $target_language, $translated, 'ai');
-                    $total_translated++;
+                    $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $target_language, $translated, 'ai');
+                    if ($saved_id) {
+                        $total_translated++;
+                    }
                 }
             }
 
@@ -222,6 +225,8 @@ class Fanyi2_Batch {
             'Return to shop', 'Coupon', 'Remove', 'Quantity',
             'Price', 'Product', 'Shipping', 'Free shipping',
             'Flat rate', 'Calculate shipping', 'Update totals',
+            'Cart is empty', 'Shipping options', 'Estimated total',
+            'Continue to shipping', 'Continue to payment',
 
             // 结账
             'Checkout', 'Billing details', 'Shipping details',
@@ -232,6 +237,9 @@ class Fanyi2_Batch {
             'Phone', 'Email address', 'Create an account?',
             'Notes about your order', 'Ship to a different address?',
             'Payment method', 'Order summary',
+            'Contact information', 'Shipping address', 'Billing address',
+            'Use same address for billing', 'Payment', 'Review order',
+            'Express checkout', 'Have a coupon?', 'Apply',
 
             // 账户
             'My account', 'Dashboard', 'Orders', 'Downloads',
@@ -276,10 +284,19 @@ class Fanyi2_Batch {
             'Apply', 'Cancel', 'Submit', 'Update', 'Delete',
             'Yes', 'No', 'OK', 'Error', 'Success',
             'Loading...', 'Please wait...', 'Required field',
+
+            // 常见中文（语言包/区块场景）
+            '购物车', '产品', '合计', '小计', '添加优惠券',
+            '购物车总计', '预估总额', '继续结账', '删除项目', '节省',
+            '配送', '订单总计', '结账', '账单详情', '收货地址',
+            '联系信息', '配送地址', '配送选项', '付款选项', '订单摘要',
+            '使用相同的地址付款', '为订单添加备注', '继续购买即表示，您同意我们的 条款和条件 和 隐私政策',
+            '编辑', '银行汇款', '货到付款',
         );
 
         $count = 0;
         foreach ($wc_strings as $str) {
+            // 1) 收录原始字符串
             $obj = Fanyi2_Database::get_or_create_string($str, array(
                 'domain'       => 'woocommerce',
                 'element_type' => 'gettext',
@@ -287,6 +304,115 @@ class Fanyi2_Batch {
             ));
             if ($obj) {
                 $count++;
+            }
+
+            // 2) 收录 WooCommerce 语言包当前翻译（例如中文站点里的“购物车总计”）
+            $localized_wc = __($str, 'woocommerce');
+            if (is_string($localized_wc) && $localized_wc !== $str && !empty(trim($localized_wc))) {
+                $obj = Fanyi2_Database::get_or_create_string($localized_wc, array(
+                    'domain'       => 'woocommerce',
+                    'element_type' => 'gettext',
+                    'page_url'     => '',
+                ));
+                if ($obj) {
+                    $count++;
+                }
+            }
+
+            // 3) 收录 Woo Blocks 语言包当前翻译
+            $localized_blocks = __($str, 'woo-gutenberg-products-block');
+            if (is_string($localized_blocks) && $localized_blocks !== $str && !empty(trim($localized_blocks))) {
+                $obj = Fanyi2_Database::get_or_create_string($localized_blocks, array(
+                    'domain'       => 'woocommerce',
+                    'element_type' => 'gettext',
+                    'page_url'     => '',
+                ));
+                if ($obj) {
+                    $count++;
+                }
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * 注册 WooCommerce 中存于数据库的动态文案
+     * 如：配送方式标题、支付方式标题/说明、隐私政策文案等
+     */
+    public static function register_woocommerce_dynamic_settings_strings() {
+        $count = 0;
+
+        // 1) 隐私政策相关文案（结账/注册）
+        $privacy_options = array(
+            'woocommerce_checkout_privacy_policy_text',
+            'woocommerce_registration_privacy_policy_text',
+            'woocommerce_checkout_terms_and_conditions_text',
+        );
+        foreach ($privacy_options as $opt_key) {
+            $value = get_option($opt_key, '');
+            if (!empty($value)) {
+                $count += self::register_single_string($value, 'woocommerce_setting', '', 'woocommerce');
+            }
+        }
+
+        // 2) 支付网关标题/描述/指引
+        if (function_exists('WC') && WC()->payment_gateways()) {
+            $gateways = WC()->payment_gateways()->payment_gateways();
+            if (!empty($gateways) && is_array($gateways)) {
+                foreach ($gateways as $gateway) {
+                    if (!empty($gateway->title)) {
+                        $count += self::register_single_string($gateway->title, 'payment_gateway_title', '', 'woocommerce');
+                    }
+                    if (!empty($gateway->description)) {
+                        $count += self::register_single_string($gateway->description, 'payment_gateway_desc', '', 'woocommerce');
+                    }
+                    if (!empty($gateway->instructions)) {
+                        $count += self::register_single_string($gateway->instructions, 'payment_gateway_instructions', '', 'woocommerce');
+                    }
+                }
+            }
+        }
+
+        // 3) 运送方式标题（各配送区域实例）
+        if (class_exists('WC_Shipping_Zones')) {
+            $zones = WC_Shipping_Zones::get_zones();
+            if (!empty($zones) && is_array($zones)) {
+                foreach ($zones as $zone_data) {
+                    if (empty($zone_data['shipping_methods']) || !is_array($zone_data['shipping_methods'])) {
+                        continue;
+                    }
+                    foreach ($zone_data['shipping_methods'] as $method) {
+                        if (is_object($method)) {
+                            if (method_exists($method, 'get_title')) {
+                                $title = $method->get_title();
+                                if (!empty($title)) {
+                                    $count += self::register_single_string($title, 'shipping_method_title', '', 'woocommerce');
+                                }
+                            }
+                            if (method_exists($method, 'get_method_title')) {
+                                $method_title = $method->get_method_title();
+                                if (!empty($method_title)) {
+                                    $count += self::register_single_string($method_title, 'shipping_method_label', '', 'woocommerce');
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 兜底：默认区域
+            $default_zone = new WC_Shipping_Zone(0);
+            $default_methods = $default_zone->get_shipping_methods();
+            if (!empty($default_methods) && is_array($default_methods)) {
+                foreach ($default_methods as $method) {
+                    if (is_object($method) && method_exists($method, 'get_title')) {
+                        $title = $method->get_title();
+                        if (!empty($title)) {
+                            $count += self::register_single_string($title, 'shipping_method_title', '', 'woocommerce');
+                        }
+                    }
+                }
             }
         }
 

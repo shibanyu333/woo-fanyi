@@ -10,11 +10,13 @@ if (!defined('ABSPATH')) {
 class Fanyi2_Frontend {
 
     private static $current_language = null;
+    private static $locale_switched = false;
 
     /**
      * 初始化
      */
     public static function init() {
+        add_action('init', array(__CLASS__, 'maybe_switch_wordpress_locale'), 0);
         add_action('wp_footer', array(__CLASS__, 'render_language_switcher'));
         add_action('wp_footer', array(__CLASS__, 'render_editor_toolbar'));
         add_action('template_redirect', array(__CLASS__, 'detect_and_set_language'), 1);
@@ -34,6 +36,127 @@ class Fanyi2_Frontend {
         // RTL 语言修正：让 WooCommerce Flexslider 及画廊在 RTL 模式下正常工作
         add_filter('woocommerce_single_product_carousel_options', array(__CLASS__, 'fix_gallery_rtl'));
         add_action('wp_enqueue_scripts', array(__CLASS__, 'maybe_enqueue_rtl_fix'), 99);
+    }
+
+    /**
+     * 前台/REST 请求按当前语言切换 WP locale（让 Woo 原生语言包生效）
+     */
+    public static function maybe_switch_wordpress_locale() {
+        if (self::$locale_switched) {
+            return;
+        }
+
+        // 后台页面保持管理员语言，避免影响后台体验
+        if (is_admin() && !wp_doing_ajax()) {
+            return;
+        }
+
+        $lang = self::resolve_language_for_locale_switch();
+        if (empty($lang)) {
+            return;
+        }
+
+        $target_locale = self::map_language_to_locale($lang);
+        if (empty($target_locale)) {
+            return;
+        }
+
+        if (function_exists('determine_locale') && determine_locale() === $target_locale) {
+            self::$locale_switched = true;
+            return;
+        }
+
+        if (function_exists('switch_to_locale')) {
+            switch_to_locale($target_locale);
+            self::$locale_switched = true;
+        }
+    }
+
+    /**
+     * 解析本次请求用于 locale 切换的语言
+     */
+    private static function resolve_language_for_locale_switch() {
+        $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $url_mode = get_option('fanyi2_url_mode', 'parameter');
+
+        $language = null;
+
+        if (isset($_GET['lang'])) {
+            $language = sanitize_text_field($_GET['lang']);
+        }
+
+        if (empty($language) && $url_mode === 'subdirectory') {
+            $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+            $req_path = parse_url($request_uri, PHP_URL_PATH);
+            $home_path = parse_url(home_url(), PHP_URL_PATH);
+            $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
+            $relative = $req_path;
+            if ($home_path_clean) {
+                $relative = substr($req_path, strlen($home_path_clean));
+            }
+            $relative = ltrim((string) $relative, '/');
+            $segments = explode('/', $relative);
+            $first_seg = !empty($segments[0]) ? $segments[0] : '';
+
+            if (in_array($first_seg, $enabled, true)) {
+                $language = $first_seg;
+            }
+        }
+
+        if (empty($language) && isset($_COOKIE['fanyi2_language'])) {
+            $language = sanitize_text_field($_COOKIE['fanyi2_language']);
+        }
+
+        if (empty($language)) {
+            $language = Fanyi2_IP_Detector::detect_language();
+        }
+
+        if (empty($language) || !in_array($language, $enabled, true)) {
+            $language = $default_lang;
+        }
+
+        return $language;
+    }
+
+    /**
+     * 语言代码映射为 WordPress locale
+     */
+    private static function map_language_to_locale($lang) {
+        $locale_map = array(
+            'zh' => 'zh_CN',
+            'hk' => 'zh_HK',
+            'tw' => 'zh_TW',
+            'en' => 'en_US',
+            'ja' => 'ja',
+            'ko' => 'ko_KR',
+            'fr' => 'fr_FR',
+            'de' => 'de_DE',
+            'es' => 'es_ES',
+            'ru' => 'ru_RU',
+            'ar' => 'ar',
+            'pt' => 'pt_BR',
+            'it' => 'it_IT',
+            'th' => 'th',
+            'vi' => 'vi',
+            'id' => 'id_ID',
+            'ms' => 'ms_MY',
+            'tr' => 'tr_TR',
+            'pl' => 'pl_PL',
+            'nl' => 'nl_NL',
+            'sv' => 'sv_SE',
+            'da' => 'da_DK',
+            'fi' => 'fi',
+            'no' => 'nb_NO',
+            'uk' => 'uk',
+            'cs' => 'cs_CZ',
+            'el' => 'el',
+            'he' => 'he_IL',
+            'hi' => 'hi_IN',
+            'bn' => 'bn_BD',
+        );
+
+        return isset($locale_map[$lang]) ? $locale_map[$lang] : $lang;
     }
 
     /**

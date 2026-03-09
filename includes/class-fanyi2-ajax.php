@@ -330,25 +330,45 @@ class Fanyi2_Ajax {
             ));
         }
 
-        $texts = array();
-        foreach ($untranslated as $str) {
-            $texts[$str->id] = $str->original_string;
-        }
-
+        $texts_for_ai = array();
         $source_language = get_option('fanyi2_default_language', 'zh');
-        $results = Fanyi2_AI_Engine::translate_batch($texts, $language, $source_language);
 
-        if (is_wp_error($results)) {
-            wp_send_json_error(array('message' => $results->get_error_message()));
+        // 翻译记忆复用：规范化原文一致则直接沿用已有译文，减少AI调用
+        $memory_map = Fanyi2_Database::get_translation_memory_map($language);
+
+        $saved_from_memory = 0;
+        foreach ($untranslated as $str) {
+            $normalized = Fanyi2_Database::normalize_string($str->original_string);
+            if ($normalized !== '' && isset($memory_map[$normalized])) {
+                $saved_id = Fanyi2_Database::save_translation_if_missing($str->id, $language, $memory_map[$normalized], 'memory');
+                if ($saved_id) {
+                    $saved_from_memory++;
+                }
+                continue;
+            }
+
+            $texts_for_ai[$str->id] = $str->original_string;
         }
 
-        $saved = 0;
-        foreach ($results as $string_id => $translated) {
-            if (!empty($translated)) {
-                Fanyi2_Database::save_translation($string_id, $language, $translated, 'ai');
-                $saved++;
+        $saved_from_ai = 0;
+        if (!empty($texts_for_ai)) {
+            $results = Fanyi2_AI_Engine::translate_batch($texts_for_ai, $language, $source_language);
+
+            if (is_wp_error($results)) {
+                wp_send_json_error(array('message' => $results->get_error_message()));
+            }
+
+            foreach ($results as $string_id => $translated) {
+                if (!empty($translated)) {
+                    $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $language, $translated, 'ai');
+                    if ($saved_id) {
+                        $saved_from_ai++;
+                    }
+                }
             }
         }
+
+        $saved = $saved_from_memory + $saved_from_ai;
 
         // 清除该语言的翻译缓存
         Fanyi2_Translator::clear_translation_cache($language);
@@ -358,8 +378,10 @@ class Fanyi2_Ajax {
 
         wp_send_json_success(array(
             'translated' => $saved,
+            'translated_by_memory' => $saved_from_memory,
+            'translated_by_ai' => $saved_from_ai,
             'remaining'  => $remaining,
-            'message'    => sprintf('本批次翻译了 %d 条', $saved),
+            'message'    => sprintf('本批次处理 %d 条（复用 %d 条，AI翻译 %d 条）', $saved, $saved_from_memory, $saved_from_ai),
         ));
     }
 
@@ -508,6 +530,7 @@ class Fanyi2_Ajax {
             'fanyi2_language_custom_names',
             'fanyi2_language_custom_flags',
             'fanyi2_hidden_language_flags',
+            'fanyi2_country_language_map',
             'fanyi2_ai_engine',
             'fanyi2_deepseek_api_key',
             'fanyi2_deepseek_model',
@@ -533,6 +556,13 @@ class Fanyi2_Ajax {
             'fanyi2_switcher_visible',
         );
 
+        $enabled_languages = array();
+        if (!empty($settings['fanyi2_enabled_languages']) && is_array($settings['fanyi2_enabled_languages'])) {
+            $enabled_languages = array_map('sanitize_text_field', $settings['fanyi2_enabled_languages']);
+        } else {
+            $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        }
+
         foreach ($settings as $key => $value) {
             if (!in_array($key, $allowed_options)) {
                 continue;
@@ -541,6 +571,18 @@ class Fanyi2_Ajax {
             if (is_array($value)) {
                 // 数组值（如 enabled_languages）逐项清理
                 $value = array_map('sanitize_text_field', $value);
+
+                if ($clean_key === 'fanyi2_country_language_map') {
+                    $filtered = array();
+                    foreach ($value as $country => $lang) {
+                        $country_code = strtoupper(sanitize_text_field($country));
+                        $lang_code = sanitize_text_field($lang);
+                        if (preg_match('/^[A-Z]{2}$/', $country_code) && !empty($lang_code) && in_array($lang_code, $enabled_languages, true)) {
+                            $filtered[$country_code] = $lang_code;
+                        }
+                    }
+                    $value = $filtered;
+                }
             } else {
                 $value = sanitize_text_field($value);
             }

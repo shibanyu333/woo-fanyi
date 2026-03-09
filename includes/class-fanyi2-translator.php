@@ -19,6 +19,7 @@ class Fanyi2_Translator {
     private static $gettext_cache = array();
     private static $persistent_cache_loaded = false;
     private static $persistent_cache_group = 'fanyi2_trans';
+    private static $runtime_registered_hashes = array();
 
     /**
      * 初始化（保留供外部调用；输出缓冲已由 Fanyi2_Frontend::start_translation_buffer 启动）
@@ -35,14 +36,19 @@ class Fanyi2_Translator {
         $current_lang = Fanyi2_Frontend::get_current_language();
         $default_lang = get_option('fanyi2_default_language', 'zh');
 
-        if ($current_lang === $default_lang) {
-            return;
-        }
+        $should_translate = ($current_lang !== $default_lang);
 
         // --- gettext 级别拦截：覆盖 WooCommerce 核心翻译 ---
         add_filter('gettext', array(__CLASS__, 'filter_gettext'), 10, 3);
         add_filter('gettext_with_context', array(__CLASS__, 'filter_gettext_with_context'), 10, 4);
         add_filter('ngettext', array(__CLASS__, 'filter_ngettext'), 10, 5);
+
+        // --- Woo Blocks / Store API 响应兜底翻译（购物车/结账区块） ---
+        add_filter('rest_pre_echo_response', array(__CLASS__, 'filter_store_api_response'), 10, 3);
+
+        if (!$should_translate) {
+            return;
+        }
 
         if (!class_exists('WooCommerce')) {
             return;
@@ -133,12 +139,11 @@ class Fanyi2_Translator {
      * 拦截 gettext（__() / _e() 等）
      */
     public static function filter_gettext($translated, $text, $domain) {
-        // 只处理 woocommerce 和 wordpress 核心 domain
-        $target_domains = array('woocommerce', 'default', '');
-        if (!in_array($domain, $target_domains, true)) {
+        if (!self::is_target_domain($domain)) {
             return $translated;
         }
 
+        self::capture_runtime_string($translated, $domain);
         return self::maybe_translate($translated);
     }
 
@@ -146,11 +151,11 @@ class Fanyi2_Translator {
      * 拦截带上下文的 gettext（_x()）
      */
     public static function filter_gettext_with_context($translated, $text, $context, $domain) {
-        $target_domains = array('woocommerce', 'default', '');
-        if (!in_array($domain, $target_domains, true)) {
+        if (!self::is_target_domain($domain)) {
             return $translated;
         }
 
+        self::capture_runtime_string($translated, $domain, $context);
         return self::maybe_translate($translated);
     }
 
@@ -158,12 +163,161 @@ class Fanyi2_Translator {
      * 拦截复数形式 gettext（_n()）
      */
     public static function filter_ngettext($translated, $single, $plural, $number, $domain) {
-        $target_domains = array('woocommerce', 'default', '');
-        if (!in_array($domain, $target_domains, true)) {
+        if (!self::is_target_domain($domain)) {
             return $translated;
         }
 
+        self::capture_runtime_string($translated, $domain);
         return self::maybe_translate($translated);
+    }
+
+    /**
+     * 目标翻译域
+     */
+    private static function is_target_domain($domain) {
+        $target_domains = array('woocommerce', 'woo-gutenberg-products-block', 'default', '');
+
+        if (in_array($domain, $target_domains, true)) {
+            return true;
+        }
+
+        return (strpos((string) $domain, 'woocommerce') !== false);
+    }
+
+    /**
+     * 是否处于 WooCommerce 场景（用于 default domain 的抓取限流）
+     */
+    private static function is_woocommerce_context() {
+        if (is_admin()) {
+            return false;
+        }
+
+        if (!class_exists('WooCommerce')) {
+            return false;
+        }
+
+        if (function_exists('is_woocommerce') && is_woocommerce()) {
+            return true;
+        }
+
+        if (function_exists('is_cart') && is_cart()) {
+            return true;
+        }
+
+        if (function_exists('is_checkout') && is_checkout()) {
+            return true;
+        }
+
+        if (function_exists('is_account_page') && is_account_page()) {
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 过滤 Woo Store API 响应，翻译其中文本字段
+     */
+    public static function filter_store_api_response($result, $server, $request) {
+        if (!is_array($result) && !is_object($result)) {
+            return $result;
+        }
+
+        if (!is_object($request) || !method_exists($request, 'get_route')) {
+            return $result;
+        }
+
+        $route = (string) $request->get_route();
+        if (strpos($route, '/wc/store/') !== 0) {
+            return $result;
+        }
+
+        return self::translate_store_api_data($result);
+    }
+
+    /**
+     * 递归翻译 Store API 数据
+     */
+    private static function translate_store_api_data($data) {
+        if (is_string($data)) {
+            $text = trim($data);
+
+            if ($text === '' || mb_strlen($text) < 2 || mb_strlen($text) > 200) {
+                return $data;
+            }
+
+            // 跳过URL/邮箱/纯数字金额编码
+            if (filter_var($text, FILTER_VALIDATE_URL)
+                || filter_var($text, FILTER_VALIDATE_EMAIL)
+                || preg_match('/^[\d\s\.,:%#\-+\/]+$/u', $text)) {
+                return $data;
+            }
+
+            if (!preg_match('/[\p{L}]/u', $text)) {
+                return $data;
+            }
+
+            return self::maybe_translate($text);
+        }
+
+        if (is_array($data)) {
+            foreach ($data as $key => $value) {
+                $data[$key] = self::translate_store_api_data($value);
+            }
+            return $data;
+        }
+
+        if (is_object($data)) {
+            foreach ($data as $key => $value) {
+                $data->{$key} = self::translate_store_api_data($value);
+            }
+            return $data;
+        }
+
+        return $data;
+    }
+
+    /**
+     * 运行期自动抓取 gettext 字符串，便于后台补翻译
+     */
+    private static function capture_runtime_string($text, $domain = 'woocommerce', $context = '') {
+        if (empty($text) || !is_string($text)) {
+            return;
+        }
+
+        $text = trim($text);
+        if (mb_strlen($text) < 2 || mb_strlen($text) > 300) {
+            return;
+        }
+
+        if (!preg_match('/[\p{L}]/u', $text)) {
+            return;
+        }
+
+        $domain = (string) $domain;
+        if ($domain === 'default' || $domain === '') {
+            if (!self::is_woocommerce_context()) {
+                return;
+            }
+            $domain = 'woocommerce';
+        }
+
+        if ($domain === 'woo-gutenberg-products-block') {
+            $domain = 'woocommerce';
+        }
+
+        $hash = md5($domain . '|' . $context . '|' . $text);
+        if (isset(self::$runtime_registered_hashes[$hash])) {
+            return;
+        }
+        self::$runtime_registered_hashes[$hash] = 1;
+
+        Fanyi2_Database::get_or_create_string($text, array(
+            'domain'       => $domain,
+            'context'      => (string) $context,
+            'element_type' => 'gettext',
+            'page_url'     => '',
+        ));
     }
 
     /**

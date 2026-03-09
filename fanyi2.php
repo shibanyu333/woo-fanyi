@@ -3,7 +3,7 @@
  * Plugin Name: Fanyi2 - AI 智能翻译
  * Plugin URI: https://github.com/fanyi2
  * Description: 类似TranslatePress的WordPress多语言翻译插件，支持前端可视化翻译、DeepSeek/千问AI翻译、浏览器语言自动切换、兼容woo-huilv汇率插件
- * Version: 2.0.0
+ * Version: 8.1.0
  * Author: Fanyi2
  * Author URI: https://github.com/fanyi2
  * License: GPL v2 or later
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 }
 
 // 插件常量
-define('FANYI2_VERSION', '2.0.0');
+define('FANYI2_VERSION', '8.1.0');
 define('FANYI2_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FANYI2_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('FANYI2_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -123,6 +123,7 @@ final class Fanyi2 {
             'fanyi2_language_custom_names' => array(),
             'fanyi2_language_custom_flags' => array(),
             'fanyi2_hidden_language_flags' => array(),
+            'fanyi2_country_language_map' => array(),
             'fanyi2_ai_engine'         => 'deepseek',
             'fanyi2_deepseek_api_key'  => '',
             'fanyi2_deepseek_model'    => 'deepseek-chat',
@@ -211,6 +212,27 @@ final class Fanyi2 {
 
         $languages = get_option('fanyi2_enabled_languages', array());
         $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        // REST/AJAX/接口请求通常没有语言前缀，不应把用户语言重置回默认语言
+        // 例如：/wp-json/wc/store/*（Checkout/Cart Blocks）
+        $is_api_request = false;
+        if (defined('REST_REQUEST') && REST_REQUEST) {
+            $is_api_request = true;
+        }
+        if (wp_doing_ajax()) {
+            $is_api_request = true;
+        }
+        if (strpos($request_uri, '/wp-json/') !== false || strpos($request_uri, 'rest_route=') !== false) {
+            $is_api_request = true;
+        }
+        if (strpos($request_uri, 'wc-ajax=') !== false) {
+            $is_api_request = true;
+        }
+
+        if ($is_api_request) {
+            // 保持现有 cookie，不做默认语言重置
+            return;
+        }
 
         // 检查路径的第一段是否是语言代码
         $segments = explode('/', $relative);

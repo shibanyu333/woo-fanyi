@@ -13,6 +13,22 @@ class Fanyi2_Database {
     const TABLE_STRINGS = 'fanyi2_strings';
 
     /**
+     * 规范化字符串（用于翻译记忆复用）
+     */
+    public static function normalize_string($text) {
+        if (!is_string($text)) {
+            return '';
+        }
+
+        $text = wp_strip_all_tags($text);
+        $text = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $text = preg_replace('/\s+/u', ' ', $text);
+        $text = trim((string) $text);
+
+        return $text;
+    }
+
+    /**
      * 创建数据库表
      */
     public static function create_tables() {
@@ -147,6 +163,32 @@ class Fanyi2_Database {
         ));
 
         return $wpdb->insert_id;
+    }
+
+    /**
+     * 判断字符串在目标语言是否已有已发布翻译
+     */
+    public static function has_published_translation($string_id, $language) {
+        global $wpdb;
+
+        $table = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $exists = $wpdb->get_var($wpdb->prepare(
+            "SELECT id FROM $table WHERE string_id = %d AND language = %s AND status = 'published' LIMIT 1",
+            $string_id, $language
+        ));
+
+        return !empty($exists);
+    }
+
+    /**
+     * 仅在缺失时保存翻译（避免二次翻译覆盖）
+     */
+    public static function save_translation_if_missing($string_id, $language, $translated_string, $source = 'manual') {
+        if (self::has_published_translation($string_id, $language)) {
+            return 0;
+        }
+
+        return self::save_translation($string_id, $language, $translated_string, $source);
     }
 
     /**
@@ -460,5 +502,37 @@ class Fanyi2_Database {
              WHERE s.status = 'active' AND t.id IS NULL",
             $language
         ));
+    }
+
+    /**
+     * 获取目标语言翻译记忆映射：规范化原文 => 译文
+     */
+    public static function get_translation_memory_map($language) {
+        global $wpdb;
+
+        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+
+        $rows = $wpdb->get_results($wpdb->prepare(
+            "SELECT s.original_string, t.translated_string
+             FROM $table_trans t
+             INNER JOIN $table_strings s ON t.string_id = s.id
+             WHERE t.language = %s AND t.status = 'published' AND s.status = 'active'",
+            $language
+        ));
+
+        $map = array();
+        foreach ($rows as $row) {
+            $normalized = self::normalize_string($row->original_string);
+            if ($normalized === '' || empty($row->translated_string)) {
+                continue;
+            }
+
+            if (!isset($map[$normalized])) {
+                $map[$normalized] = $row->translated_string;
+            }
+        }
+
+        return $map;
     }
 }
