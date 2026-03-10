@@ -437,6 +437,17 @@ class Fanyi2_Admin {
                         </select>
                     </div>
                     <div class="fanyi2-field" style="margin-bottom:15px;">
+                        <label for="fanyi2-batch-scope">翻译范围:</label>
+                        <select id="fanyi2-batch-scope">
+                            <option value="all">整站全部</option>
+                            <option value="homepage">仅首页</option>
+                            <option value="products">仅商品页面</option>
+                            <option value="other_pages">其他页面</option>
+                            <option value="woocommerce">仅 WooCommerce</option>
+                        </select>
+                        <p class="description" style="margin-top:6px;">可按范围单独翻译，进度也会按“语言+范围”分别保存。</p>
+                    </div>
+                    <div class="fanyi2-field" style="margin-bottom:15px;">
                         <label for="fanyi2-batch-size">每批数量:</label>
                         <input type="number" id="fanyi2-batch-size" value="<?php echo esc_attr($batch_size); ?>" min="1" max="500" style="width:90px;">
                         <p class="description" style="margin-top:6px;">支持 1-500。中途关闭页面也会保留已翻译进度。</p>

@@ -559,27 +559,135 @@ class Fanyi2_Database {
     }
 
     /**
+     * 规范化整站翻译范围
+     */
+    public static function normalize_translation_scope($scope) {
+        $scope = sanitize_key((string) $scope);
+        $allowed = array('all', 'homepage', 'products', 'other_pages', 'woocommerce');
+        return in_array($scope, $allowed, true) ? $scope : 'all';
+    }
+
+    /**
+     * 首页 URL 变体（兼容有/无尾斜杠）
+     */
+    private static function get_homepage_url_variants() {
+        $variants = array(
+            '/',
+            home_url('/'),
+            home_url(''),
+        );
+
+        $normalized = array();
+        foreach ($variants as $url) {
+            $url = trim((string) $url);
+            if ($url === '') {
+                continue;
+            }
+
+            $normalized[$url] = true;
+            if (substr($url, -1) === '/') {
+                $no_slash = rtrim($url, '/');
+                if ($no_slash !== '') {
+                    $normalized[$no_slash] = true;
+                }
+            } else {
+                $normalized[$url . '/'] = true;
+            }
+        }
+
+        return array_keys($normalized);
+    }
+
+    /**
+     * 构建范围筛选 SQL（用于整站翻译分区）
+     */
+    private static function get_scope_sql_conditions($scope) {
+        $scope = self::normalize_translation_scope($scope);
+        if ($scope === 'all') {
+            return array(
+                'sql'    => '',
+                'params' => array(),
+            );
+        }
+
+        $home_variants = self::get_homepage_url_variants();
+        $home_parts = array(
+            "s.element_type IN ('site_title','site_description')",
+            "s.page_url = '/'",
+        );
+        $home_params = array();
+        foreach ($home_variants as $url) {
+            $home_parts[] = 's.page_url = %s';
+            $home_params[] = $url;
+        }
+        $home_sql = '(' . implode(' OR ', $home_parts) . ')';
+
+        $products_sql = "(s.page_url LIKE %s OR s.element_type IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value'))";
+        $products_params = array('%/product/%');
+
+        $woocommerce_sql = "(s.domain = %s OR s.element_type LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s)";
+        $woocommerce_params = array(
+            'woocommerce',
+            'woocommerce_%',
+            '%/cart%',
+            '%/checkout%',
+            '%/my-account%',
+            '%/shop%',
+        );
+
+        switch ($scope) {
+            case 'homepage':
+                return array(
+                    'sql'    => ' AND ' . $home_sql,
+                    'params' => $home_params,
+                );
+            case 'products':
+                return array(
+                    'sql'    => ' AND ' . $products_sql,
+                    'params' => $products_params,
+                );
+            case 'woocommerce':
+                return array(
+                    'sql'    => ' AND ' . $woocommerce_sql,
+                    'params' => $woocommerce_params,
+                );
+            case 'other_pages':
+                return array(
+                    'sql'    => ' AND NOT (' . $home_sql . ' OR ' . $products_sql . ' OR ' . $woocommerce_sql . ')',
+                    'params' => array_merge($home_params, $products_params, $woocommerce_params),
+                );
+            default:
+                return array(
+                    'sql'    => '',
+                    'params' => array(),
+                );
+        }
+    }
+
+    /**
      * 获取未翻译的字符串
      */
-    public static function get_untranslated_strings($language, $limit = 50) {
+    public static function get_untranslated_strings($language, $limit = 50, $scope = 'all') {
         global $wpdb;
 
         $equivalent_languages = self::get_equivalent_translation_languages($language);
+        $scope_conditions = self::get_scope_sql_conditions($scope);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
         $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-        $params = array_merge($equivalent_languages, array($limit));
+        $params = array_merge($equivalent_languages, $scope_conditions['params'], array($limit));
 
         $results = $wpdb->get_results($wpdb->prepare(
             "SELECT s.* FROM $table_strings s
              WHERE s.status = 'active'
+               {$scope_conditions['sql']}
                AND NOT EXISTS (
                    SELECT 1 FROM $table_trans t
                    WHERE t.string_id = s.id
                      AND t.language IN ($lang_placeholders)
                      AND t.status = 'published'
                )
-             ORDER BY s.created_at ASC
+             ORDER BY CHAR_LENGTH(s.original_string) ASC, s.created_at ASC
              LIMIT %d",
             $params
         ));
@@ -590,53 +698,75 @@ class Fanyi2_Database {
     /**
      * 获取未翻译字符串的总数（轻量 COUNT 查询）
      */
-    public static function count_untranslated_strings($language) {
+    public static function count_untranslated_strings($language, $scope = 'all') {
         global $wpdb;
 
         $equivalent_languages = self::get_equivalent_translation_languages($language);
+        $scope_conditions = self::get_scope_sql_conditions($scope);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
         $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, $scope_conditions['params']);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_strings s
              WHERE s.status = 'active'
+               {$scope_conditions['sql']}
                AND NOT EXISTS (
                    SELECT 1 FROM $table_trans t
                    WHERE t.string_id = s.id
                      AND t.language IN ($lang_placeholders)
                      AND t.status = 'published'
                )",
-            $equivalent_languages
+            $params
         ));
     }
 
     /**
      * 统计已发布翻译数量（按 string_id 去重）
      */
-    public static function count_translated_strings($language) {
+    public static function count_translated_strings($language, $scope = 'all') {
         global $wpdb;
 
         $equivalent_languages = self::get_equivalent_translation_languages($language);
+        $scope_conditions = self::get_scope_sql_conditions($scope);
+        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
         $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, $scope_conditions['params']);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(DISTINCT string_id)
-             FROM $table_trans
-             WHERE language IN ($lang_placeholders) AND status = 'published'",
-            $equivalent_languages
+             FROM $table_trans t
+             INNER JOIN $table_strings s ON t.string_id = s.id
+             WHERE t.language IN ($lang_placeholders)
+               AND t.status = 'published'
+               AND s.status = 'active'
+               {$scope_conditions['sql']}",
+            $params
         ));
     }
 
     /**
      * 统计活跃源字符串总数
      */
-    public static function count_active_strings() {
+    public static function count_active_strings($scope = 'all') {
         global $wpdb;
 
+        $scope_conditions = self::get_scope_sql_conditions($scope);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
-        return (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_strings WHERE status = 'active'");
+        $params = $scope_conditions['params'];
+
+        if (empty($params)) {
+            return (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_strings s WHERE s.status = 'active' {$scope_conditions['sql']}");
+        }
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM $table_strings s
+             WHERE s.status = 'active'
+               {$scope_conditions['sql']}",
+            $params
+        ));
     }
 
     /**
