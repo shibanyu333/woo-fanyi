@@ -2,7 +2,7 @@
 
 WordPress 多语言翻译插件，支持 6 种 AI 引擎、28 种语言、前端可视化编辑、WooCommerce 深度集成。
 
-> **版本** 8.1.0 · **PHP** ≥ 7.4 · **WordPress** ≥ 5.6 · **WooCommerce** ≥ 5.0（可选）
+> **版本** 9.0 · **PHP** ≥ 7.4 · **WordPress** ≥ 5.6 · **WooCommerce** ≥ 5.0（可选）
 
 ---
 

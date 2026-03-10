@@ -30,8 +30,8 @@ class Fanyi2_Frontend {
         // 添加hreflang标签用于SEO
         add_action('wp_head', array(__CLASS__, 'add_hreflang_tags'));
 
-        // 注册 WooCommerce 专用翻译钩子
-        add_action('wp', array('Fanyi2_Translator', 'register_wc_hooks'));
+        // 注册 WooCommerce 专用翻译钩子（需覆盖 REST /wc/store/* 请求）
+        add_action('init', array('Fanyi2_Translator', 'register_wc_hooks'), 20);
 
         // RTL 语言修正：让 WooCommerce Flexslider 及画廊在 RTL 模式下正常工作
         add_filter('woocommerce_single_product_carousel_options', array(__CLASS__, 'fix_gallery_rtl'));

@@ -8,6 +8,7 @@
         init: function() {
             this.bindEvents();
             this.initTabs();
+            this.loadPretranslateProgress();
         },
 
         bindEvents: function() {
@@ -43,6 +44,11 @@
             // 翻译所有语言
             $('#fanyi2-translate-all-langs').on('click', function() {
                 Fanyi2Admin.translateAllLanguages();
+            });
+
+            // 切换目标语言时加载该语言最近进度
+            $('#fanyi2-batch-target-lang').on('change', function() {
+                Fanyi2Admin.loadPretranslateProgress();
             });
 
             // 编辑翻译（保留旧选择器作为兼容）
@@ -251,13 +257,68 @@
          */
         startPretranslate: function() {
             var targetLang = $('#fanyi2-batch-target-lang').val();
-            var batchSize = parseInt($('#fanyi2-batch-size').val()) || 10;
+            var batchSize = this.normalizeBatchSize($('#fanyi2-batch-size').val());
             var $btn = $('#fanyi2-start-pretranslate');
 
             $btn.prop('disabled', true).text('翻译中...');
             $('#fanyi2-pretranslate-progress').show();
             
             this.runPretranslateBatch(targetLang, batchSize, 0);
+        },
+
+        normalizeBatchSize: function(value) {
+            var size = parseInt(value, 10);
+            if (isNaN(size)) {
+                size = 30;
+            }
+            size = Math.max(1, Math.min(500, size));
+            $('#fanyi2-batch-size').val(size);
+            return size;
+        },
+
+        loadPretranslateProgress: function() {
+            if ($('#fanyi2-start-pretranslate').length === 0) {
+                return;
+            }
+
+            var targetLang = $('#fanyi2-batch-target-lang').val();
+            if (!targetLang) {
+                return;
+            }
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_get_pretranslate_progress',
+                    nonce: fanyi2_admin.nonce,
+                    language: targetLang
+                },
+                timeout: 60000,
+                success: function(response) {
+                    if (!response.success || !response.data || !response.data.progress) {
+                        return;
+                    }
+
+                    var p = response.data.progress;
+                    var translatedTotal = parseInt(p.translated_total || 0, 10);
+                    var totalStrings = parseInt(p.total_strings || 0, 10);
+                    var remaining = parseInt(p.remaining || 0, 10);
+                    var statusText = p.status === 'completed' ? '已完成' : '进行中';
+                    var updatedAt = p.updated_at || '';
+                    var base = '上次进度（' + statusText + '）：已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining;
+                    if (updatedAt) {
+                        base += '（更新于 ' + updatedAt + '）';
+                    }
+                    $('.fanyi2-pretranslate-status').text(base);
+
+                    if (totalStrings > 0) {
+                        var percent = Math.round((translatedTotal / totalStrings) * 100);
+                        $('#fanyi2-pretranslate-progress').show();
+                        $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percent + '%');
+                    }
+                }
+            });
         },
 
         runPretranslateBatch: function(targetLang, batchSize, totalTranslated) {
@@ -270,29 +331,36 @@
                     action: 'fanyi2_batch_pretranslate',
                     nonce: fanyi2_admin.nonce,
                     language: targetLang,
-                    batch_size: batchSize
+                    batch_size: batchSize,
+                    rounds_per_request: 3
                 },
-                timeout: 120000,
+                timeout: 300000,
                 success: function(response) {
                     if (response.success) {
                         totalTranslated += response.data.translated;
                         var remaining = response.data.remaining;
+                        var translatedTotal = parseInt(response.data.translated_total || totalTranslated, 10);
+                        var totalStrings = parseInt(response.data.total_strings || (translatedTotal + remaining), 10);
 
                         if (remaining > 0 && response.data.translated > 0) {
-                            var percent = Math.round((totalTranslated / (totalTranslated + remaining)) * 100);
-                            $('.fanyi2-pretranslate-status').text('已翻译 ' + totalTranslated + ' 条，还剩 ' + remaining + ' 条...');
+                            var percent = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : Math.round((totalTranslated / (totalTranslated + remaining)) * 100);
+                            $('.fanyi2-pretranslate-status').text('已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining + '...');
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percent + '%');
                             
                             // 继续下一批
                             setTimeout(function() {
                                 self.runPretranslateBatch(targetLang, batchSize, totalTranslated);
-                            }, 1000);
+                            }, 100);
                         } else {
                             // 翻译完成
                             $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', '100%');
-                            $('.fanyi2-pretranslate-status').text('✅ 翻译完成！共翻译 ' + totalTranslated + ' 条');
-                            Fanyi2Admin.showAdminNotice('success', '翻译完成！共翻译 ' + totalTranslated + ' 条');
+                            $('.fanyi2-pretranslate-status').text('✅ 翻译完成！共翻译 ' + translatedTotal + ' / ' + totalStrings + ' 条');
+                            Fanyi2Admin.showAdminNotice('success', '翻译完成！共翻译 ' + translatedTotal + ' 条');
+                        }
+
+                        if (response.data.warnings && response.data.warnings.length) {
+                            Fanyi2Admin.showAdminNotice('error', '部分批次出现警告：' + response.data.warnings.join(' | '));
                         }
                     } else {
                         $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
@@ -312,7 +380,7 @@
         translateAllLanguages: function() {
             var enabledLangs = fanyi2_admin.settings.enabled_languages;
             var defaultLang = fanyi2_admin.settings.default_language;
-            var batchSize = parseInt($('#fanyi2-batch-size').val()) || 10;
+            var batchSize = this.normalizeBatchSize($('#fanyi2-batch-size').val());
 
             var targetLangs = enabledLangs.filter(function(lang) {
                 return lang !== defaultLang;
@@ -360,14 +428,15 @@
                     action: 'fanyi2_batch_pretranslate',
                     nonce: fanyi2_admin.nonce,
                     language: lang,
-                    batch_size: batchSize
+                    batch_size: batchSize,
+                    rounds_per_request: 3
                 },
-                timeout: 120000,
+                timeout: 300000,
                 success: function(response) {
                     if (response.success && response.data.remaining > 0 && response.data.translated > 0) {
                         setTimeout(function() {
                             self.pretranslateLanguage(lang, batchSize, callback);
-                        }, 1000);
+                        }, 100);
                     } else {
                         callback();
                     }

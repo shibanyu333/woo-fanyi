@@ -20,6 +20,7 @@ class Fanyi2_Translator {
     private static $persistent_cache_loaded = false;
     private static $persistent_cache_group = 'fanyi2_trans';
     private static $runtime_registered_hashes = array();
+    private static $wc_hooks_registered = false;
 
     /**
      * 初始化（保留供外部调用；输出缓冲已由 Fanyi2_Frontend::start_translation_buffer 启动）
@@ -33,15 +34,21 @@ class Fanyi2_Translator {
      * 注册 WooCommerce 专用翻译钩子（在 Fanyi2_Frontend::init 中调用）
      */
     public static function register_wc_hooks() {
-        $current_lang = Fanyi2_Frontend::get_current_language();
-        $default_lang = get_option('fanyi2_default_language', 'zh');
+        if (self::$wc_hooks_registered) {
+            return;
+        }
+        self::$wc_hooks_registered = true;
 
-        $should_translate = ($current_lang !== $default_lang);
+        $should_translate = self::should_translate_current_request();
 
         // --- gettext 级别拦截：覆盖 WooCommerce 核心翻译 ---
         add_filter('gettext', array(__CLASS__, 'filter_gettext'), 10, 3);
         add_filter('gettext_with_context', array(__CLASS__, 'filter_gettext_with_context'), 10, 4);
         add_filter('ngettext', array(__CLASS__, 'filter_ngettext'), 10, 5);
+        add_filter('ngettext_with_context', array(__CLASS__, 'filter_ngettext_with_context'), 10, 6);
+
+        // --- Woo Blocks 前端 JS 文案翻译（购物车/结账区块） ---
+        add_filter('load_script_translations', array(__CLASS__, 'filter_script_translations'), 10, 4);
 
         // --- Woo Blocks / Store API 响应兜底翻译（购物车/结账区块） ---
         add_filter('rest_pre_echo_response', array(__CLASS__, 'filter_store_api_response'), 10, 3);
@@ -172,6 +179,18 @@ class Fanyi2_Translator {
     }
 
     /**
+     * 拦截带上下文复数形式 gettext（_nx()）
+     */
+    public static function filter_ngettext_with_context($translated, $single, $plural, $number, $context, $domain) {
+        if (!self::is_target_domain($domain)) {
+            return $translated;
+        }
+
+        self::capture_runtime_string($translated, $domain, $context);
+        return self::maybe_translate($translated);
+    }
+
+    /**
      * 目标翻译域
      */
     private static function is_target_domain($domain) {
@@ -182,6 +201,30 @@ class Fanyi2_Translator {
         }
 
         return (strpos((string) $domain, 'woocommerce') !== false);
+    }
+
+    /**
+     * 是否需要在当前请求执行翻译（非默认语言）
+     */
+    private static function should_translate_current_request() {
+        $current_lang = Fanyi2_Frontend::get_current_language();
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        return (!empty($current_lang) && $current_lang !== $default_lang);
+    }
+
+    /**
+     * 是否为 WooCommerce 相关脚本句柄
+     */
+    private static function is_woocommerce_script_handle($handle) {
+        $handle = (string) $handle;
+        if ($handle === '') {
+            return false;
+        }
+
+        return (strpos($handle, 'wc-') === 0
+            || strpos($handle, 'woocommerce') !== false
+            || strpos($handle, 'woo-') === 0);
     }
 
     /**
@@ -233,6 +276,78 @@ class Fanyi2_Translator {
         }
 
         return self::translate_store_api_data($result);
+    }
+
+    /**
+     * 过滤 JS i18n 翻译 JSON，覆盖 Woo Blocks（Cart / Checkout）前端文案
+     */
+    public static function filter_script_translations($translations, $file, $handle, $domain) {
+        if (empty($translations) || !is_string($translations)) {
+            return $translations;
+        }
+
+        $is_woo_domain = self::is_target_domain($domain);
+        $is_woo_handle = self::is_woocommerce_script_handle($handle);
+
+        if (!$is_woo_domain && !$is_woo_handle) {
+            return $translations;
+        }
+
+        $decoded = json_decode($translations, true);
+        if (!is_array($decoded) || empty($decoded['locale_data']) || !is_array($decoded['locale_data'])) {
+            return $translations;
+        }
+
+        $should_translate = self::should_translate_current_request();
+        $changed = false;
+        $capture_domain = $is_woo_domain ? (string) $domain : 'woocommerce';
+
+        foreach ($decoded['locale_data'] as $locale_domain => $messages) {
+            if (!is_array($messages)) {
+                continue;
+            }
+
+            foreach ($messages as $source => $forms) {
+                if ($source === '' || !is_array($forms)) {
+                    continue;
+                }
+
+                self::capture_runtime_string($source, $capture_domain, 'js_i18n');
+
+                foreach ($forms as $index => $translated_text) {
+                    if (!is_string($translated_text) || $translated_text === '') {
+                        continue;
+                    }
+
+                    self::capture_runtime_string($translated_text, $capture_domain, 'js_i18n');
+
+                    if (!$should_translate) {
+                        continue;
+                    }
+
+                    $new_text = self::maybe_translate($translated_text);
+                    if ($new_text === $translated_text) {
+                        // fallback：部分语言包会给出英语文案，尝试用原 msgid 查库
+                        $source_text = self::maybe_translate($source);
+                        if ($source_text !== $source) {
+                            $new_text = $source_text;
+                        }
+                    }
+
+                    if ($new_text !== $translated_text) {
+                        $decoded['locale_data'][$locale_domain][$source][$index] = $new_text;
+                        $changed = true;
+                    }
+                }
+            }
+        }
+
+        if (!$changed) {
+            return $translations;
+        }
+
+        $encoded = wp_json_encode($decoded, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+        return is_string($encoded) ? $encoded : $translations;
     }
 
     /**
@@ -331,7 +446,9 @@ class Fanyi2_Translator {
         self::$persistent_cache_loaded = true;
 
         $current_lang = Fanyi2_Frontend::get_current_language();
-        $cache_key = 'fanyi2_all_' . $current_lang;
+        $cache_lang = Fanyi2_Database::resolve_translation_language($current_lang);
+        $equivalent_languages = Fanyi2_Database::get_equivalent_translation_languages($cache_lang);
+        $cache_key = 'fanyi2_all_' . $cache_lang;
 
         // 尝试从 wp_cache（object cache）读取
         $cached = wp_cache_get($cache_key, self::$persistent_cache_group);
@@ -352,18 +469,23 @@ class Fanyi2_Translator {
         global $wpdb;
         $table_strings = $wpdb->prefix . Fanyi2_Database::TABLE_STRINGS;
         $table_trans   = $wpdb->prefix . Fanyi2_Database::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, array($cache_lang));
 
         $results = $wpdb->get_results($wpdb->prepare(
             "SELECT s.string_hash, t.translated_string
              FROM {$table_trans} t
              INNER JOIN {$table_strings} s ON t.string_id = s.id
-             WHERE t.language = %s AND t.status = 'published' AND s.status = 'active'",
-            $current_lang
+             WHERE t.language IN ($lang_placeholders) AND t.status = 'published' AND s.status = 'active'
+             ORDER BY CASE WHEN t.language = %s THEN 0 ELSE 1 END, t.updated_at DESC",
+            $params
         ));
 
         $map = array();
         foreach ($results as $row) {
-            $map[$row->string_hash] = $row->translated_string;
+            if (!isset($map[$row->string_hash])) {
+                $map[$row->string_hash] = $row->translated_string;
+            }
         }
 
         self::$gettext_cache = $map;
@@ -378,14 +500,28 @@ class Fanyi2_Translator {
      */
     public static function clear_translation_cache($lang = '') {
         if ($lang) {
-            $cache_key = 'fanyi2_all_' . $lang;
-            wp_cache_delete($cache_key, self::$persistent_cache_group);
-            delete_transient($cache_key);
+            $canonical_lang = Fanyi2_Database::resolve_translation_language($lang);
+            $cache_keys = array('fanyi2_all_' . $canonical_lang);
+            // 兼容历史缓存键
+            if ($canonical_lang === 'tw') {
+                $cache_keys[] = 'fanyi2_all_hk';
+            }
+            foreach (array_unique($cache_keys) as $cache_key) {
+                wp_cache_delete($cache_key, self::$persistent_cache_group);
+                delete_transient($cache_key);
+            }
         } else {
             // 清除所有语言
             $languages = get_option('fanyi2_enabled_languages', array());
+            $cache_keys = array();
             foreach ($languages as $l) {
-                $cache_key = 'fanyi2_all_' . $l;
+                $canonical_lang = Fanyi2_Database::resolve_translation_language($l);
+                $cache_keys[] = 'fanyi2_all_' . $canonical_lang;
+                if ($canonical_lang === 'tw') {
+                    $cache_keys[] = 'fanyi2_all_hk';
+                }
+            }
+            foreach (array_unique($cache_keys) as $cache_key) {
                 wp_cache_delete($cache_key, self::$persistent_cache_group);
                 delete_transient($cache_key);
             }
@@ -399,7 +535,11 @@ class Fanyi2_Translator {
      * 优化：先预加载所有翻译到内存，然后通过哈希查找，O(1) 复杂度
      */
     private static function maybe_translate($text) {
-        if (empty($text) || mb_strlen($text) < 2) {
+        if (!is_string($text) || empty($text) || mb_strlen($text) < 2) {
+            return $text;
+        }
+
+        if (!self::should_translate_current_request()) {
             return $text;
         }
 
@@ -410,6 +550,15 @@ class Fanyi2_Translator {
         $hash = md5($text);
         if (isset(self::$gettext_cache[$hash])) {
             return self::$gettext_cache[$hash];
+        }
+
+        // 兼容 HTML 实体/空白差异（常见于块 JSON 文案）
+        $normalized = trim((string) preg_replace('/\s+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+        if ($normalized !== '' && $normalized !== $text) {
+            $hash = md5($normalized);
+            if (isset(self::$gettext_cache[$hash])) {
+                return self::$gettext_cache[$hash];
+            }
         }
 
         // 未命中：没有这条翻译

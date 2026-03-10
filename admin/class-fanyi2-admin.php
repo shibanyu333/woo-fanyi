@@ -399,7 +399,7 @@ class Fanyi2_Admin {
         $language_names = Fanyi2_Frontend::get_language_names();
         $enabled_languages = get_option('fanyi2_enabled_languages', array());
         $default_lang = get_option('fanyi2_default_language', 'zh');
-        $batch_size = get_option('fanyi2_batch_size', 10);
+        $batch_size = get_option('fanyi2_batch_size', 30);
         ?>
         <div class="wrap fanyi2-admin-wrap">
             <h1>🤖 整站翻译</h1>
@@ -438,7 +438,8 @@ class Fanyi2_Admin {
                     </div>
                     <div class="fanyi2-field" style="margin-bottom:15px;">
                         <label for="fanyi2-batch-size">每批数量:</label>
-                        <input type="number" id="fanyi2-batch-size" value="<?php echo esc_attr($batch_size); ?>" min="1" max="50" style="width:80px;">
+                        <input type="number" id="fanyi2-batch-size" value="<?php echo esc_attr($batch_size); ?>" min="1" max="500" style="width:90px;">
+                        <p class="description" style="margin-top:6px;">支持 1-500。中途关闭页面也会保留已翻译进度。</p>
                     </div>
                     <button id="fanyi2-start-pretranslate" class="button button-primary button-hero">
                         🚀 开始翻译
@@ -962,9 +963,9 @@ class Fanyi2_Admin {
                                 <th>每批翻译数量</th>
                                 <td>
                                     <input type="number" name="fanyi2_batch_size" 
-                                           value="<?php echo esc_attr(get_option('fanyi2_batch_size', 10)); ?>"
-                                           min="1" max="50">
-                                    <p class="description">每次API请求翻译的字符串数量，建议10-20。</p>
+                                           value="<?php echo esc_attr(get_option('fanyi2_batch_size', 30)); ?>"
+                                           min="1" max="500">
+                                    <p class="description">每次翻译处理的基础数量，建议 30-150（高配服务器可更高）。</p>
                                 </td>
                             </tr>
                         </table>

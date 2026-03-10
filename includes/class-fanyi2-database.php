@@ -29,6 +29,29 @@ class Fanyi2_Database {
     }
 
     /**
+     * 语言别名归一化（用于共享翻译桶）
+     * 当前策略：香港/台湾共用繁体翻译，统一落在 tw 桶
+     */
+    public static function resolve_translation_language($language) {
+        $language = sanitize_text_field((string) $language);
+        if ($language === 'hk' || $language === 'tw') {
+            return 'tw';
+        }
+        return $language;
+    }
+
+    /**
+     * 获取语言的等价查询集合（兼容历史数据）
+     */
+    public static function get_equivalent_translation_languages($language) {
+        $canonical = self::resolve_translation_language($language);
+        if ($canonical === 'tw') {
+            return array('tw', 'hk');
+        }
+        return array($canonical);
+    }
+
+    /**
      * 创建数据库表
      */
     public static function create_tables() {
@@ -131,24 +154,37 @@ class Fanyi2_Database {
     public static function save_translation($string_id, $language, $translated_string, $source = 'manual') {
         global $wpdb;
 
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
         $table = $wpdb->prefix . self::TABLE_TRANSLATIONS;
 
-        // 检查是否已存在
+        // 优先查找 canonical 语言记录
         $existing = $wpdb->get_row($wpdb->prepare(
             "SELECT * FROM $table WHERE string_id = %d AND language = %s",
-            $string_id, $language
+            $string_id, $canonical_language
         ));
+
+        // 兼容历史：若 canonical 不存在，尝试查找等价语言记录（如旧 hk）
+        if (!$existing && count($equivalent_languages) > 1) {
+            $placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+            $params = array_merge(array($string_id), $equivalent_languages);
+            $existing = $wpdb->get_row($wpdb->prepare(
+                "SELECT * FROM $table WHERE string_id = %d AND language IN ($placeholders) ORDER BY updated_at DESC LIMIT 1",
+                $params
+            ));
+        }
 
         if ($existing) {
             $wpdb->update(
                 $table,
                 array(
+                    'language'           => $canonical_language,
                     'translated_string'  => $translated_string,
                     'translation_source' => $source,
                     'status'             => 'published',
                 ),
                 array('id' => $existing->id),
-                array('%s', '%s', '%s'),
+                array('%s', '%s', '%s', '%s'),
                 array('%d')
             );
             return $existing->id;
@@ -156,7 +192,7 @@ class Fanyi2_Database {
 
         $wpdb->insert($table, array(
             'string_id'          => $string_id,
-            'language'           => $language,
+            'language'           => $canonical_language,
             'translated_string'  => $translated_string,
             'translation_source' => $source,
             'status'             => 'published',
@@ -171,10 +207,13 @@ class Fanyi2_Database {
     public static function has_published_translation($string_id, $language) {
         global $wpdb;
 
+        $equivalent_languages = self::get_equivalent_translation_languages($language);
         $table = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge(array($string_id), $equivalent_languages);
         $exists = $wpdb->get_var($wpdb->prepare(
-            "SELECT id FROM $table WHERE string_id = %d AND language = %s AND status = 'published' LIMIT 1",
-            $string_id, $language
+            "SELECT id FROM $table WHERE string_id = %d AND language IN ($placeholders) AND status = 'published' LIMIT 1",
+            $params
         ));
 
         return !empty($exists);
@@ -197,17 +236,24 @@ class Fanyi2_Database {
     public static function get_translation($original_string, $language) {
         global $wpdb;
 
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
         $string_hash = md5($original_string);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge(array($string_hash), $equivalent_languages, array($canonical_language));
 
         $result = $wpdb->get_var($wpdb->prepare(
-            "SELECT t.translated_string 
-             FROM $table_trans t 
-             INNER JOIN $table_strings s ON t.string_id = s.id 
-             WHERE s.string_hash = %s AND t.language = %s AND t.status = 'published'
+            "SELECT t.translated_string
+             FROM $table_trans t
+             INNER JOIN $table_strings s ON t.string_id = s.id
+             WHERE s.string_hash = %s
+               AND t.language IN ($placeholders)
+               AND t.status = 'published'
+             ORDER BY CASE WHEN t.language = %s THEN 0 ELSE 1 END, t.updated_at DESC
              LIMIT 1",
-            $string_hash, $language
+            $params
         ));
 
         return $result;
@@ -223,6 +269,8 @@ class Fanyi2_Database {
             return array();
         }
 
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
 
@@ -234,20 +282,26 @@ class Fanyi2_Database {
             $hash_to_original[$hash] = $str;
         }
 
-        $placeholders = implode(',', array_fill(0, count($hashes), '%s'));
-        $params = array_merge($hashes, array($language));
+        $hash_placeholders = implode(',', array_fill(0, count($hashes), '%s'));
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($hashes, $equivalent_languages, array($canonical_language));
 
         $results = $wpdb->get_results($wpdb->prepare(
-            "SELECT s.string_hash, s.original_string, t.translated_string 
+            "SELECT s.string_hash, s.original_string, t.translated_string, t.language
              FROM $table_trans t 
              INNER JOIN $table_strings s ON t.string_id = s.id 
-             WHERE s.string_hash IN ($placeholders) AND t.language = %s AND t.status = 'published'",
+             WHERE s.string_hash IN ($hash_placeholders)
+               AND t.language IN ($lang_placeholders)
+               AND t.status = 'published'
+             ORDER BY s.string_hash ASC, CASE WHEN t.language = %s THEN 0 ELSE 1 END, t.updated_at DESC",
             $params
         ));
 
         $translations = array();
         foreach ($results as $row) {
-            $translations[$row->original_string] = $row->translated_string;
+            if (!isset($translations[$row->original_string])) {
+                $translations[$row->original_string] = $row->translated_string;
+            }
         }
 
         return $translations;
@@ -259,15 +313,27 @@ class Fanyi2_Database {
     public static function get_page_translations($page_url, $language) {
         global $wpdb;
 
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, array($canonical_language, $page_url));
 
         $results = $wpdb->get_results($wpdb->prepare(
-            "SELECT s.original_string, s.string_hash, s.selector, t.translated_string 
-             FROM $table_strings s 
-             LEFT JOIN $table_trans t ON s.id = t.string_id AND t.language = %s
+            "SELECT s.original_string, s.string_hash, s.selector,
+                    (
+                        SELECT tt.translated_string
+                        FROM $table_trans tt
+                        WHERE tt.string_id = s.id
+                          AND tt.language IN ($lang_placeholders)
+                          AND tt.status = 'published'
+                        ORDER BY CASE WHEN tt.language = %s THEN 0 ELSE 1 END, tt.updated_at DESC
+                        LIMIT 1
+                    ) AS translated_string
+             FROM $table_strings s
              WHERE s.page_url = %s AND s.status = 'active'",
-            $language, $page_url
+            $params
         ));
 
         return $results;
@@ -315,31 +381,48 @@ class Fanyi2_Database {
         $target_langs = array_filter($enabled_languages, function($l) use ($default_lang) {
             return $l !== $default_lang;
         });
-        $target_lang_count = count($target_langs);
+        $canonical_target_langs = array();
+        foreach ($target_langs as $lang_code) {
+            $canonical_target_langs[self::resolve_translation_language($lang_code)] = true;
+        }
+        $target_lang_count = count($canonical_target_langs);
 
         if (!empty($args['translation_status']) || !empty($args['filter_language'])) {
             // 需要使用子查询来计算翻译状态
             if (!empty($args['filter_language'])) {
-                $filter_lang = $args['filter_language'];
+                $filter_lang = self::resolve_translation_language($args['filter_language']);
+                $equivalent_filter_langs = self::get_equivalent_translation_languages($filter_lang);
                 if ($args['translation_status'] === 'translated') {
-                    $where[] = "EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
-                    $params[] = $filter_lang;
+                    if (count($equivalent_filter_langs) === 1) {
+                        $where[] = "EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
+                        $params[] = $filter_lang;
+                    } else {
+                        $lang_placeholders = implode(',', array_fill(0, count($equivalent_filter_langs), '%s'));
+                        $where[] = "EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language IN ($lang_placeholders) AND t2.status = 'published')";
+                        $params = array_merge($params, $equivalent_filter_langs);
+                    }
                 } elseif ($args['translation_status'] === 'untranslated') {
-                    $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
-                    $params[] = $filter_lang;
+                    if (count($equivalent_filter_langs) === 1) {
+                        $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language = %s AND t2.status = 'published')";
+                        $params[] = $filter_lang;
+                    } else {
+                        $lang_placeholders = implode(',', array_fill(0, count($equivalent_filter_langs), '%s'));
+                        $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.language IN ($lang_placeholders) AND t2.status = 'published')";
+                        $params = array_merge($params, $equivalent_filter_langs);
+                    }
                 }
             } else {
                 if ($args['translation_status'] === 'translated' && $target_lang_count > 0) {
                     // 所有目标语言都有翻译
-                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') >= %d";
+                    $where[] = "(SELECT COUNT(DISTINCT CASE WHEN t2.language IN ('hk','tw') THEN 'tw' ELSE t2.language END) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') >= %d";
                     $params[] = $target_lang_count;
                 } elseif ($args['translation_status'] === 'untranslated') {
                     // 没有任何翻译
                     $where[] = "NOT EXISTS (SELECT 1 FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published')";
                 } elseif ($args['translation_status'] === 'partial' && $target_lang_count > 0) {
                     // 有一些翻译，但不完整
-                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') > 0";
-                    $where[] = "(SELECT COUNT(DISTINCT t2.language) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') < %d";
+                    $where[] = "(SELECT COUNT(DISTINCT CASE WHEN t2.language IN ('hk','tw') THEN 'tw' ELSE t2.language END) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') > 0";
+                    $where[] = "(SELECT COUNT(DISTINCT CASE WHEN t2.language IN ('hk','tw') THEN 'tw' ELSE t2.language END) FROM $table_trans t2 WHERE t2.string_id = s.id AND t2.status = 'published') < %d";
                     $params[] = $target_lang_count;
                 }
             }
@@ -403,6 +486,13 @@ class Fanyi2_Database {
             $string->translations[$t->language] = $t;
         }
 
+        // 香港/台湾共享繁体翻译：详情回填显示
+        if (isset($string->translations['tw']) && !isset($string->translations['hk'])) {
+            $string->translations['hk'] = $string->translations['tw'];
+        } elseif (isset($string->translations['hk']) && !isset($string->translations['tw'])) {
+            $string->translations['tw'] = $string->translations['hk'];
+        }
+
         return $string;
     }
 
@@ -448,9 +538,11 @@ class Fanyi2_Database {
         $languages = get_option('fanyi2_enabled_languages', array());
         $lang_stats = array();
         foreach ($languages as $lang) {
+            $equivalent_languages = self::get_equivalent_translation_languages($lang);
+            $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
             $count = (int) $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM $table_trans WHERE language = %s AND status = 'published'",
-                $lang
+                "SELECT COUNT(DISTINCT string_id) FROM $table_trans WHERE language IN ($lang_placeholders) AND status = 'published'",
+                $equivalent_languages
             ));
             $lang_stats[$lang] = array(
                 'translated' => $count,
@@ -472,16 +564,24 @@ class Fanyi2_Database {
     public static function get_untranslated_strings($language, $limit = 50) {
         global $wpdb;
 
+        $equivalent_languages = self::get_equivalent_translation_languages($language);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, array($limit));
 
         $results = $wpdb->get_results($wpdb->prepare(
-            "SELECT s.* FROM $table_strings s 
-             LEFT JOIN $table_trans t ON s.id = t.string_id AND t.language = %s
-             WHERE s.status = 'active' AND t.id IS NULL
+            "SELECT s.* FROM $table_strings s
+             WHERE s.status = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM $table_trans t
+                   WHERE t.string_id = s.id
+                     AND t.language IN ($lang_placeholders)
+                     AND t.status = 'published'
+               )
              ORDER BY s.created_at ASC
              LIMIT %d",
-            $language, $limit
+            $params
         ));
 
         return $results;
@@ -493,15 +593,50 @@ class Fanyi2_Database {
     public static function count_untranslated_strings($language) {
         global $wpdb;
 
+        $equivalent_languages = self::get_equivalent_translation_languages($language);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_strings s
-             LEFT JOIN $table_trans t ON s.id = t.string_id AND t.language = %s
-             WHERE s.status = 'active' AND t.id IS NULL",
-            $language
+             WHERE s.status = 'active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM $table_trans t
+                   WHERE t.string_id = s.id
+                     AND t.language IN ($lang_placeholders)
+                     AND t.status = 'published'
+               )",
+            $equivalent_languages
         ));
+    }
+
+    /**
+     * 统计已发布翻译数量（按 string_id 去重）
+     */
+    public static function count_translated_strings($language) {
+        global $wpdb;
+
+        $equivalent_languages = self::get_equivalent_translation_languages($language);
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+
+        return (int) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(DISTINCT string_id)
+             FROM $table_trans
+             WHERE language IN ($lang_placeholders) AND status = 'published'",
+            $equivalent_languages
+        ));
+    }
+
+    /**
+     * 统计活跃源字符串总数
+     */
+    public static function count_active_strings() {
+        global $wpdb;
+
+        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
+        return (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_strings WHERE status = 'active'");
     }
 
     /**
@@ -510,15 +645,20 @@ class Fanyi2_Database {
     public static function get_translation_memory_map($language) {
         global $wpdb;
 
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $params = array_merge($equivalent_languages, array($canonical_language));
 
         $rows = $wpdb->get_results($wpdb->prepare(
             "SELECT s.original_string, t.translated_string
              FROM $table_trans t
              INNER JOIN $table_strings s ON t.string_id = s.id
-             WHERE t.language = %s AND t.status = 'published' AND s.status = 'active'",
-            $language
+             WHERE t.language IN ($lang_placeholders) AND t.status = 'published' AND s.status = 'active'
+             ORDER BY CASE WHEN t.language = %s THEN 0 ELSE 1 END, t.updated_at DESC",
+            $params
         ));
 
         $map = array();
