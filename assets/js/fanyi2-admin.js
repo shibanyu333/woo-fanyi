@@ -304,7 +304,12 @@
                     var translatedTotal = parseInt(p.translated_total || 0, 10);
                     var totalStrings = parseInt(p.total_strings || 0, 10);
                     var remaining = parseInt(p.remaining || 0, 10);
-                    var statusText = p.status === 'completed' ? '已完成' : '进行中';
+                    var statusText = '进行中';
+                    if (p.status === 'completed') {
+                        statusText = '已完成';
+                    } else if (p.status === 'stalled') {
+                        statusText = '已暂停';
+                    }
                     var updatedAt = p.updated_at || '';
                     var base = '上次进度（' + statusText + '）：已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining;
                     if (updatedAt) {
@@ -341,8 +346,9 @@
                         var remaining = response.data.remaining;
                         var translatedTotal = parseInt(response.data.translated_total || totalTranslated, 10);
                         var totalStrings = parseInt(response.data.total_strings || (translatedTotal + remaining), 10);
+                        var status = response.data.status || (remaining > 0 ? 'running' : 'completed');
 
-                        if (remaining > 0 && response.data.translated > 0) {
+                        if (status === 'running' && remaining > 0 && response.data.translated > 0) {
                             var percent = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : Math.round((totalTranslated / (totalTranslated + remaining)) * 100);
                             $('.fanyi2-pretranslate-status').text('已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining + '...');
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percent + '%');
@@ -351,12 +357,19 @@
                             setTimeout(function() {
                                 self.runPretranslateBatch(targetLang, batchSize, totalTranslated);
                             }, 100);
-                        } else {
+                        } else if (status === 'completed' || remaining <= 0) {
                             // 翻译完成
                             $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', '100%');
                             $('.fanyi2-pretranslate-status').text('✅ 翻译完成！共翻译 ' + translatedTotal + ' / ' + totalStrings + ' 条');
                             Fanyi2Admin.showAdminNotice('success', '翻译完成！共翻译 ' + translatedTotal + ' 条');
+                        } else {
+                            // 有剩余但本轮无进展，避免误报“完成”
+                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                            var percentStalled = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
+                            $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentStalled + '%');
+                            $('.fanyi2-pretranslate-status').text('⚠ 本轮未推进。已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining + '。可重试或调小批次。');
+                            Fanyi2Admin.showAdminNotice('error', '本轮未推进，已暂停。请重试或调小每批数量。');
                         }
 
                         if (response.data.warnings && response.data.warnings.length) {
@@ -433,7 +446,7 @@
                 },
                 timeout: 300000,
                 success: function(response) {
-                    if (response.success && response.data.remaining > 0 && response.data.translated > 0) {
+                    if (response.success && response.data.status === 'running' && response.data.remaining > 0 && response.data.translated > 0) {
                         setTimeout(function() {
                             self.pretranslateLanguage(lang, batchSize, callback);
                         }, 100);

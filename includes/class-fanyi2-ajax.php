@@ -445,7 +445,16 @@ class Fanyi2_Ajax {
         // 获取剩余未翻译数量（使用 COUNT 查询，而非 LIMIT 1 后 count 数组）
         $remaining = Fanyi2_Database::count_untranslated_strings($language);
         $translated_total = Fanyi2_Database::count_translated_strings($language);
-        $status = ($remaining > 0) ? 'running' : 'completed';
+        if ($remaining <= 0) {
+            $status = 'completed';
+        } elseif ($saved > 0) {
+            $status = 'running';
+        } else {
+            $status = 'stalled';
+            if (empty($warnings)) {
+                $warnings[] = '本轮未产生新译文，可能是模型返回格式异常或该批次文本需重试';
+            }
+        }
 
         self::persist_pretranslate_progress($language, array(
             'status'                           => $status,
