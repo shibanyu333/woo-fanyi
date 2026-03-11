@@ -68,13 +68,9 @@ class Fanyi2_Ajax {
     private static function normalize_batch_size($batch_size) {
         $batch_size = intval($batch_size);
         if ($batch_size <= 0) {
-            $batch_size = intval(get_option('fanyi2_batch_size', 30));
+            $batch_size = 500;
         }
-        if ($batch_size <= 0) {
-            $batch_size = 30;
-        }
-
-        return max(1, min(500, $batch_size));
+        return max(50, min(500, $batch_size));
     }
 
     /**
@@ -141,15 +137,15 @@ class Fanyi2_Ajax {
     private static function get_ai_chunk_size($batch_size) {
         $batch_size = intval($batch_size);
         if ($batch_size >= 300) {
-            return 45;
+            return 50;
         }
         if ($batch_size >= 150) {
-            return 60;
+            return 50;
         }
         if ($batch_size >= 80) {
-            return 75;
+            return 40;
         }
-        return max(20, min(80, $batch_size));
+        return max(20, min(50, $batch_size));
     }
 
     /**
@@ -282,7 +278,7 @@ class Fanyi2_Ajax {
 
         $saved = array();
         foreach ($strings as $item) {
-            $text = isset($item['text']) ? sanitize_text_field(wp_unslash($item['text'])) : '';
+            $text = isset($item['text']) ? trim(wp_strip_all_tags(wp_unslash($item['text']))) : '';
             $selector = isset($item['selector']) ? sanitize_text_field($item['selector']) : '';
             $element_type = isset($item['type']) ? sanitize_text_field($item['type']) : 'text';
 
@@ -371,7 +367,7 @@ class Fanyi2_Ajax {
     public static function save_translation() {
         self::verify_admin();
 
-        $original_text = isset($_POST['original_text']) ? wp_unslash($_POST['original_text']) : '';
+        $original_text = isset($_POST['original_text']) ? trim(wp_strip_all_tags(wp_unslash($_POST['original_text']))) : '';
         $translated_text = isset($_POST['translated_text']) ? wp_unslash($_POST['translated_text']) : '';
         $language = isset($_POST['language']) ? sanitize_text_field($_POST['language']) : '';
         $page_url = isset($_POST['page_url']) ? sanitize_url($_POST['page_url']) : '';
@@ -417,7 +413,7 @@ class Fanyi2_Ajax {
 
         $saved = 0;
         foreach ($translations as $item) {
-            $original = isset($item['original']) ? wp_unslash($item['original']) : '';
+            $original = isset($item['original']) ? trim(wp_strip_all_tags(wp_unslash($item['original']))) : '';
             $translated = isset($item['translated']) ? wp_unslash($item['translated']) : '';
             $selector = isset($item['selector']) ? sanitize_text_field($item['selector']) : '';
 
@@ -514,14 +510,14 @@ class Fanyi2_Ajax {
         $source_language = get_option('fanyi2_default_language', 'zh');
         $total_strings = Fanyi2_Database::count_active_strings($scope);
 
-        // 大批量时自动降低单请求轮数，避免 500 卡在一个请求里长时间不返回
-        $round_cap = ($batch_size >= 300) ? 1 : (($batch_size >= 120) ? 2 : 3);
+        // 大批量时自动降低单请求轮数（并行处理后每轮吞吐更高，但仍需控制总时长）
+        $round_cap = 5;
         $rounds_per_request = min($rounds_per_request, $round_cap);
 
         $request_started_at = microtime(true);
-        $max_request_seconds = 35;
-        $max_items_per_request = max(45, min(140, $batch_size));
-        $query_limit = max(20, min($batch_size, $max_items_per_request));
+        $max_request_seconds = 55;
+        $max_items_per_request = 500;
+        $query_limit = 500;
         $ai_chunk_size = self::get_ai_chunk_size($batch_size);
         $attempted_ai_items = 0;
         $stop_processing = false;
@@ -565,41 +561,86 @@ class Fanyi2_Ajax {
 
             if (!empty($texts_for_ai)) {
                 $chunks = array_chunk($texts_for_ai, $ai_chunk_size, true);
-                foreach ($chunks as $chunk) {
-                    if ((microtime(true) - $request_started_at) >= $max_request_seconds) {
-                        $warnings[] = '达到单次请求时间上限，剩余条目将在下一轮继续';
-                        $stop_processing = true;
-                        break;
-                    }
 
+                // 在预算范围内裁剪 chunks
+                $budget_chunks = array();
+                foreach ($chunks as $chunk) {
                     $remaining_budget = $max_items_per_request - $attempted_ai_items;
                     if ($remaining_budget <= 0) {
                         $warnings[] = sprintf('单次请求已处理 %d 条，剩余条目将在下一轮继续', $max_items_per_request);
                         $stop_processing = true;
                         break;
                     }
-
                     if (count($chunk) > $remaining_budget) {
                         $chunk = array_slice($chunk, 0, $remaining_budget, true);
                     }
                     $attempted_ai_items += count($chunk);
+                    $budget_chunks[] = $chunk;
+                }
 
-                    $chunk_result = self::translate_batch_with_fallback($chunk, $language, $source_language);
-                    if (!empty($chunk_result['warnings'])) {
-                        $warnings = array_merge($warnings, $chunk_result['warnings']);
-                    }
+                // 并行发送所有 chunks（curl_multi），而非逐个顺序等待
+                if (!empty($budget_chunks)) {
+                    $parallel_results = Fanyi2_AI_Engine::translate_batches_parallel(
+                        $budget_chunks, $language, $source_language, null, 10
+                    );
 
-                    foreach ($chunk_result['translations'] as $string_id => $translated) {
-                        $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $language, $translated, 'ai');
-                        if ($saved_id) {
-                            $saved_from_ai++;
-                            $translated_in_round++;
+                    $fallback_items = array(); // 收集需要单条补译的项
+                    foreach ($parallel_results as $cidx => $presult) {
+                        if (!empty($presult['error'])) {
+                            $warnings[] = '并行批次失败：' . $presult['error']->get_error_message();
+                            // 整个 chunk 失败 → 加入兜底队列
+                            if (isset($budget_chunks[$cidx])) {
+                                foreach ($budget_chunks[$cidx] as $sid => $txt) {
+                                    $fallback_items[$sid] = $txt;
+                                }
+                            }
+                            continue;
                         }
 
-                        if (isset($chunk[$string_id])) {
-                            $normalized_original = Fanyi2_Database::normalize_string($chunk[$string_id]);
-                            if ($normalized_original !== '') {
-                                $memory_map[$normalized_original] = $translated;
+                        foreach ($presult['translations'] as $string_id => $translated) {
+                            $translated = trim((string) $translated);
+                            if ($translated === '') {
+                                continue;
+                            }
+                            $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $language, $translated, 'ai');
+                            if ($saved_id) {
+                                $saved_from_ai++;
+                                $translated_in_round++;
+                            }
+                            if (isset($texts_for_ai[$string_id])) {
+                                $normalized_original = Fanyi2_Database::normalize_string($texts_for_ai[$string_id]);
+                                if ($normalized_original !== '') {
+                                    $memory_map[$normalized_original] = $translated;
+                                }
+                            }
+                        }
+
+                        // 批量结果不完整的项目加入兜底
+                        if (isset($budget_chunks[$cidx])) {
+                            $missing = array_diff(array_keys($budget_chunks[$cidx]), array_keys($presult['translations']));
+                            foreach ($missing as $sid) {
+                                $fallback_items[$sid] = $budget_chunks[$cidx][$sid];
+                            }
+                        }
+                    }
+
+                    // 单条兜底补译（最多 5 条，避免长时间卡住）
+                    if (!empty($fallback_items)) {
+                        $max_fallback = 5;
+                        $fallback_count = 0;
+                        $warnings[] = sprintf('有 %d 条批量未返回，单条补译前 %d 条', count($fallback_items), min(count($fallback_items), $max_fallback));
+                        foreach ($fallback_items as $sid => $txt) {
+                            if ($fallback_count >= $max_fallback) break;
+                            if ((microtime(true) - $request_started_at) >= $max_request_seconds) break;
+                            $fallback_count++;
+                            $single = Fanyi2_AI_Engine::translate($txt, $language, $source_language);
+                            if (is_wp_error($single)) continue;
+                            $single = trim((string) $single);
+                            if ($single === '') continue;
+                            $saved_id = Fanyi2_Database::save_translation_if_missing($sid, $language, $single, 'ai');
+                            if ($saved_id) {
+                                $saved_from_ai++;
+                                $translated_in_round++;
                             }
                         }
                     }
@@ -770,11 +811,14 @@ class Fanyi2_Ajax {
             set_time_limit(300);
         }
 
-        $total = Fanyi2_Batch::scan_site_pages();
+        Fanyi2_Batch::scan_site_pages();
+
+        // 返回数据库中实际的活跃字符串总数，而非本次尝试注册的条数
+        $actual_total = Fanyi2_Database::count_active_strings('all');
 
         wp_send_json_success(array(
-            'message'     => sprintf('扫描完成！共抓取 %d 条文本', $total),
-            'total'       => $total,
+            'message'     => sprintf('扫描完成！数据库中共有 %d 条待翻译文本', $actual_total),
+            'total'       => $actual_total,
         ));
     }
 
@@ -935,6 +979,14 @@ class Fanyi2_Ajax {
             $enabled_languages = array_map('sanitize_text_field', $settings['fanyi2_enabled_languages']);
         } else {
             $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        }
+
+        // 复选框组未勾选时不会发送到服务器，需要手动设置默认空数组
+        $checkbox_array_options = array('fanyi2_hidden_language_flags');
+        foreach ($checkbox_array_options as $opt) {
+            if (!isset($settings[$opt])) {
+                $settings[$opt] = array();
+            }
         }
 
         foreach ($settings as $key => $value) {

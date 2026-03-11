@@ -34,8 +34,14 @@ class Fanyi2_Batch {
         $count = 0;
 
         // ——— 站点标题和描述 ———
-        $count += self::register_single_string(get_bloginfo('name'), 'site_title', home_url('/'), 'general');
-        $count += self::register_single_string(get_bloginfo('description'), 'site_description', home_url('/'), 'general');
+        $count += self::register_single_string(get_bloginfo('name'), 'site_title', home_url('/'), 'homepage');
+        $count += self::register_single_string(get_bloginfo('description'), 'site_description', home_url('/'), 'homepage');
+
+        // 检测首页静态页面 ID（用于标记首页内容 domain）
+        $front_page_id = 0;
+        if (get_option('show_on_front') === 'page') {
+            $front_page_id = (int) get_option('page_on_front');
+        }
 
         // ——— 所有公开的 post / page / product ———
         $post_types = array('post', 'page');
@@ -52,12 +58,21 @@ class Fanyi2_Batch {
         foreach ($all_posts as $post) {
             $url = get_permalink($post->ID);
 
+            // 根据 post_type 确定 domain，便于分范围翻译
+            if ($post->post_type === 'product') {
+                $domain = 'products';
+            } elseif ($front_page_id > 0 && $post->ID === $front_page_id) {
+                $domain = 'homepage';
+            } else {
+                $domain = 'general';
+            }
+
             // 标题
-            $count += self::register_single_string($post->post_title, 'post_title', $url);
+            $count += self::register_single_string($post->post_title, 'post_title', $url, $domain);
 
             // 摘要
             if (!empty($post->post_excerpt)) {
-                $count += self::register_single_string($post->post_excerpt, 'excerpt', $url);
+                $count += self::register_single_string($post->post_excerpt, 'excerpt', $url, $domain);
             }
 
             // 内容文本（按段拆分）
@@ -70,7 +85,7 @@ class Fanyi2_Batch {
             foreach ($lines as $line) {
                 $line = trim($line);
                 if (!empty($line) && mb_strlen($line) >= 2 && mb_strlen($line) <= 1000 && preg_match('/[\p{L}]/u', $line)) {
-                    $count += self::register_single_string($line, 'content', $url);
+                    $count += self::register_single_string($line, 'content', $url, $domain);
                 }
             }
         }
@@ -149,6 +164,7 @@ class Fanyi2_Batch {
 
     /**
      * 注册单个字符串到数据库
+     * 直接调用 get_or_create_string 即可，由其内部决定新建或补全元数据
      */
     private static function register_single_string($text, $element_type = 'text', $page_url = '', $domain = 'general') {
         $text = trim($text);

@@ -130,6 +130,24 @@ class Fanyi2_Database {
         ));
 
         if ($existing) {
+            // 补全已有记录的元数据（如之前从前端抓取时没有 page_url/domain/element_type）
+            $updates = array();
+            $formats = array();
+            if (empty($existing->page_url) && !empty($args['page_url'])) {
+                $updates['page_url'] = $args['page_url'];
+                $formats[] = '%s';
+            }
+            if (($existing->domain === 'general' || $existing->domain === '') && $args['domain'] !== 'general' && $args['domain'] !== '') {
+                $updates['domain'] = $args['domain'];
+                $formats[] = '%s';
+            }
+            if (($existing->element_type === 'text' || $existing->element_type === '') && $args['element_type'] !== 'text' && $args['element_type'] !== '') {
+                $updates['element_type'] = $args['element_type'];
+                $formats[] = '%s';
+            }
+            if (!empty($updates)) {
+                $wpdb->update($table, $updates, array('id' => $existing->id), $formats, array('%d'));
+            }
             return $existing;
         }
 
@@ -600,6 +618,7 @@ class Fanyi2_Database {
 
     /**
      * 构建范围筛选 SQL（用于整站翻译分区）
+     * 使用 domain + element_type 为主，page_url 为辅，避免对 URL 格式的强依赖
      */
     private static function get_scope_sql_conditions($scope) {
         $scope = self::normalize_translation_scope($scope);
@@ -610,9 +629,11 @@ class Fanyi2_Database {
             );
         }
 
+        // 首页：site_title/description + 标记为 homepage domain 的 + page_url 匹配
         $home_variants = self::get_homepage_url_variants();
         $home_parts = array(
             "s.element_type IN ('site_title','site_description')",
+            "s.domain = 'homepage'",
             "s.page_url = '/'",
         );
         $home_params = array();
@@ -622,10 +643,12 @@ class Fanyi2_Database {
         }
         $home_sql = '(' . implode(' OR ', $home_parts) . ')';
 
-        $products_sql = "(s.page_url LIKE %s OR s.element_type IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value'))";
+        // 产品：domain=products 或 page_url 含 /product/ 或产品相关 element_type
+        $products_sql = "(s.domain = 'products' OR s.page_url LIKE %s OR s.element_type IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value'))";
         $products_params = array('%/product/%');
 
-        $woocommerce_sql = "(s.domain = %s OR s.element_type LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s)";
+        // WooCommerce：domain=woocommerce 或 wc 相关 element_type 或典型 WC 页面 URL
+        $woocommerce_sql = "(s.domain = %s OR s.element_type LIKE %s OR s.element_type IN ('payment_gateway_title','payment_gateway_desc','payment_gateway_instructions','shipping_method_title','shipping_method_label','woocommerce_setting') OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s)";
         $woocommerce_params = array(
             'woocommerce',
             'woocommerce_%',
@@ -675,7 +698,8 @@ class Fanyi2_Database {
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
         $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-        $params = array_merge($equivalent_languages, $scope_conditions['params'], array($limit));
+        // 参数顺序必须与SQL中占位符的出现顺序一致：scope → language → limit
+        $params = array_merge($scope_conditions['params'], $equivalent_languages, array($limit));
 
         $results = $wpdb->get_results($wpdb->prepare(
             "SELECT s.* FROM $table_strings s
@@ -706,7 +730,8 @@ class Fanyi2_Database {
         $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
         $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
         $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-        $params = array_merge($equivalent_languages, $scope_conditions['params']);
+        // 参数顺序必须与SQL中占位符的出现顺序一致：scope → language
+        $params = array_merge($scope_conditions['params'], $equivalent_languages);
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_strings s

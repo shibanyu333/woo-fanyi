@@ -842,10 +842,14 @@ class Fanyi2_Translator {
     /**
      * 翻译HTML内容
      * 优化：使用预加载缓存 + 单次扫描替换，防止链式替换
+     * 增强：空白归一化回退 + 块级元素内联标签处理
      */
     public static function translate_html($html, $target_language) {
         // 确保翻译已预加载
         self::preload_translations();
+
+        // 阶段1：翻译含内联标签的块级元素（如 <p>这是<strong>重要</strong>文字</p>）
+        $html = self::translate_block_elements($html);
 
         // 提取所有文本内容
         $text_nodes = self::extract_text_from_html($html);
@@ -864,9 +868,23 @@ class Fanyi2_Translator {
                 if ($translated !== $text) {
                     $replacements[$text] = $translated;
                 }
-            } else {
-                $missed_texts[] = $text;
+                continue;
             }
+
+            // 空白归一化 + HTML实体解码 回退查找
+            $normalized = trim((string) preg_replace('/\s+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+            if ($normalized !== '' && $normalized !== $text) {
+                $norm_hash = md5($normalized);
+                if (isset(self::$gettext_cache[$norm_hash])) {
+                    $translated = self::$gettext_cache[$norm_hash];
+                    if ($translated !== $text) {
+                        $replacements[$text] = $translated;
+                    }
+                    continue;
+                }
+            }
+
+            $missed_texts[] = $text;
         }
 
         // 缓存没命中的部分，补一次批量数据库查询
@@ -875,6 +893,31 @@ class Fanyi2_Translator {
             foreach ($db_trans as $original => $translated) {
                 if (!empty($translated) && $original !== $translated) {
                     $replacements[$original] = $translated;
+                }
+            }
+
+            // 对仍未命中的文本尝试归一化后再查数据库
+            $still_missed = array_diff($missed_texts, array_keys($replacements));
+            if (!empty($still_missed)) {
+                $normalized_missed = array();
+                $norm_to_original = array();
+                foreach ($still_missed as $text) {
+                    $normalized = trim((string) preg_replace('/\s+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                    if ($normalized !== '' && $normalized !== $text && !isset($replacements[$text])) {
+                        $normalized_missed[] = $normalized;
+                        $norm_to_original[$normalized] = $text;
+                    }
+                }
+                if (!empty($normalized_missed)) {
+                    $norm_trans = Fanyi2_Database::get_translations_batch($normalized_missed, $target_language);
+                    foreach ($norm_trans as $norm_original => $translated) {
+                        if (!empty($translated) && isset($norm_to_original[$norm_original])) {
+                            $original_text = $norm_to_original[$norm_original];
+                            if ($translated !== $original_text) {
+                                $replacements[$original_text] = $translated;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -891,6 +934,66 @@ class Fanyi2_Translator {
         $html = self::safe_replace_batch($html, $replacements);
 
         return $html;
+    }
+
+    /**
+     * 翻译含内联标签的块级元素
+     * 处理如 <p>这是<strong>重要</strong>文字</p> 的场景：
+     * 数据库扫描时存储的是 strip_tags 后的 "这是重要文字"，
+     * 但 extract_text_from_html 只能提取 "这是"、"重要"、"文字" 片段无法匹配。
+     * 此方法提取块元素的完整去标签文本进行匹配。
+     */
+    private static function translate_block_elements($html) {
+        if (empty(self::$gettext_cache)) {
+            return $html;
+        }
+
+        $new_html = preg_replace_callback(
+            '/<(p|h[1-6]|li|td|th|option|button|label|figcaption|dt|dd|caption|summary)(\b[^>]*)>(.*?)<\/\1>/si',
+            function ($m) {
+                $tag   = $m[1];
+                $attrs = $m[2];
+                $inner = $m[3];
+
+                // 内部没有子标签时跳过（第一遍逐文本替换已可处理）
+                if (strip_tags($inner) === $inner) {
+                    return $m[0];
+                }
+
+                // 去标签后的纯文本内容
+                $stripped = trim(wp_strip_all_tags(html_entity_decode($inner, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                if (empty($stripped) || mb_strlen($stripped) < 2) {
+                    return $m[0];
+                }
+
+                // 查找翻译
+                $hash = md5($stripped);
+                $translated = null;
+                if (isset(self::$gettext_cache[$hash])) {
+                    $translated = self::$gettext_cache[$hash];
+                }
+
+                // 归一化重试
+                if (!$translated) {
+                    $normalized = trim((string) preg_replace('/\s+/u', ' ', $stripped));
+                    if ($normalized !== $stripped) {
+                        $norm_hash = md5($normalized);
+                        if (isset(self::$gettext_cache[$norm_hash])) {
+                            $translated = self::$gettext_cache[$norm_hash];
+                        }
+                    }
+                }
+
+                if ($translated && $translated !== $stripped) {
+                    return '<' . $tag . $attrs . '>' . esc_html($translated) . '</' . $tag . '>';
+                }
+
+                return $m[0];
+            },
+            $html
+        );
+
+        return ($new_html !== null) ? $new_html : $html;
     }
 
     /**
@@ -914,8 +1017,8 @@ class Fanyi2_Translator {
         }
 
         // 提取meta描述和title等属性中的文本（不含 value，避免翻译表单值）
-        // 使用 \b 确保只匹配完整属性名，防止误匹配 data-title, data-thumb-alt 等
-        preg_match_all('/\b(?:content|title|alt|placeholder)=["\']([^"\']+)["\']/', $html, $attr_matches);
+        // 使用 (?<=\s) 确保属性名前必须是空白，防止误匹配 data-title, data-thumb-alt 等
+        preg_match_all('/(?<=\s)(?:content|title|alt|placeholder)=["\']([^"\']+)["\']/i', $html, $attr_matches);
         if (!empty($attr_matches[1])) {
             foreach ($attr_matches[1] as $text) {
                 $text = trim($text);
@@ -970,9 +1073,9 @@ class Fanyi2_Translator {
                 $html = $new_html;
             }
 
-            // 替换属性中的文本（\b 防止误匹配 data-title, data-thumb-alt 等）
+            // 替换属性中的文本（(?<=\s) 防止误匹配 data-title, data-thumb-alt 等）
             $new_html = preg_replace(
-                '/(\b(?:content|title|alt|placeholder)=["\'])(' . $escaped . ')(["\'])/',
+                '/((?<=\s)(?:content|title|alt|placeholder)=["\'])(' . $escaped . ')(["\'])/',
                 '${1}' . $ph_attr . '${3}',
                 $html
             );

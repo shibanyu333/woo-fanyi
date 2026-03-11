@@ -36,6 +36,10 @@ class Fanyi2_Frontend {
         // RTL 语言修正：让 WooCommerce Flexslider 及画廊在 RTL 模式下正常工作
         add_filter('woocommerce_single_product_carousel_options', array(__CLASS__, 'fix_gallery_rtl'));
         add_action('wp_enqueue_scripts', array(__CLASS__, 'maybe_enqueue_rtl_fix'), 99);
+
+        // 导航菜单集成：语言切换器菜单面板 + 前台占位链接替换
+        add_action('admin_init', array(__CLASS__, 'register_nav_menu_metabox'));
+        add_filter('wp_nav_menu', array(__CLASS__, 'filter_nav_menu_items'), 10, 2);
     }
 
     /**

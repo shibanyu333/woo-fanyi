@@ -566,6 +566,265 @@ class Fanyi2_AI_Engine {
         );
     }
 
+    // ====== 并行翻译支持（curl_multi）======
+
+    /**
+     * 并行翻译多个文本批次（使用 curl_multi 同时发送多个 AI 请求）
+     *
+     * @param array  $chunks          数组，每个元素是 [string_id => text, ...] 的批次
+     * @param string $target_language
+     * @param string $source_language
+     * @param string|null $engine
+     * @param int    $max_concurrency 最大并发数（避免触发 API 限频）
+     * @return array 同键名数组，每个元素 ['translations' => [...], 'error' => WP_Error|null]
+     */
+    public static function translate_batches_parallel($chunks, $target_language, $source_language = 'zh', $engine = null, $max_concurrency = 5) {
+        if (empty($chunks)) {
+            return array();
+        }
+
+        if ($engine === null) {
+            $engine = get_option('fanyi2_ai_engine', 'deepseek');
+        }
+
+        // Google Translate 已有自身批量接口，顺序调用即可
+        if ($engine === 'google') {
+            $results = array();
+            foreach ($chunks as $idx => $texts) {
+                $batch_result = self::translate_batch_google($texts, $target_language, $source_language);
+                $results[$idx] = array(
+                    'translations' => is_wp_error($batch_result) ? array() : $batch_result,
+                    'error'        => is_wp_error($batch_result) ? $batch_result : null,
+                );
+            }
+            return $results;
+        }
+
+        // 为每个 chunk 构建 prompt
+        $prompts     = array();
+        $chunk_texts = array();
+        foreach ($chunks as $idx => $texts) {
+            $numbered = array();
+            foreach (array_values($texts) as $i => $text) {
+                $numbered[] = ($i + 1) . '. ' . $text;
+            }
+            $combined = implode("\n", $numbered);
+            $prompts[$idx]     = self::build_batch_prompt($combined, count($texts), $target_language, $source_language);
+            $chunk_texts[$idx] = $texts;
+        }
+
+        // 单 chunk 或 curl_multi 不可用时退回顺序执行
+        if (!function_exists('curl_multi_init') || count($prompts) <= 1) {
+            $results = array();
+            foreach ($prompts as $idx => $prompt) {
+                $api_result = self::call_single_engine($prompt, $engine);
+                if (is_wp_error($api_result)) {
+                    $results[$idx] = array('translations' => array(), 'error' => $api_result);
+                } else {
+                    $parsed = self::parse_batch_result($api_result, $chunk_texts[$idx]);
+                    $results[$idx] = array('translations' => $parsed, 'error' => null);
+                }
+            }
+            return $results;
+        }
+
+        // 使用 curl_multi 并发执行
+        return self::execute_parallel_requests($prompts, $chunk_texts, $engine, $max_concurrency);
+    }
+
+    /**
+     * 按引擎调用对应 API（内部路由）
+     */
+    private static function call_single_engine($prompt, $engine) {
+        switch ($engine) {
+            case 'deepseek': return self::call_deepseek_api($prompt);
+            case 'qwen':     return self::call_qwen_api($prompt);
+            case 'openai':   return self::call_openai_api($prompt);
+            case 'claude':   return self::call_claude_api($prompt);
+            case 'custom':   return self::call_custom_api($prompt);
+            default:         return new WP_Error('invalid_engine', 'Invalid engine');
+        }
+    }
+
+    /**
+     * 构建 curl 请求参数（不发送）
+     */
+    private static function build_api_request_params($prompt, $engine) {
+        switch ($engine) {
+            case 'deepseek':
+                $api_key = get_option('fanyi2_deepseek_api_key', '');
+                $api_url = get_option('fanyi2_deepseek_api_url', 'https://api.deepseek.com/v1/chat/completions');
+                $model   = get_option('fanyi2_deepseek_model', 'deepseek-chat');
+                break;
+            case 'qwen':
+                $api_key = get_option('fanyi2_qwen_api_key', '');
+                $api_url = get_option('fanyi2_qwen_api_url', 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions');
+                $model   = get_option('fanyi2_qwen_model', 'qwen-turbo');
+                break;
+            case 'openai':
+                $api_key = get_option('fanyi2_openai_api_key', '');
+                $api_url = get_option('fanyi2_openai_api_url', 'https://api.openai.com/v1/chat/completions');
+                $model   = get_option('fanyi2_openai_model', 'gpt-4o-mini');
+                break;
+            case 'custom':
+                $api_key = get_option('fanyi2_custom_api_key', '');
+                $api_url = get_option('fanyi2_custom_api_url', '');
+                $model   = get_option('fanyi2_custom_model', 'default');
+                break;
+            case 'claude':
+                $api_key = get_option('fanyi2_claude_api_key', '');
+                $api_url = get_option('fanyi2_claude_api_url', 'https://api.anthropic.com/v1/messages');
+                $model   = get_option('fanyi2_claude_model', 'claude-sonnet-4-20250514');
+                break;
+            default:
+                return new WP_Error('invalid_engine', 'Invalid engine');
+        }
+
+        if (empty($api_key) || ($engine === 'custom' && empty($api_url))) {
+            return new WP_Error('no_api_key', 'API Key 未配置');
+        }
+
+        if ($engine === 'claude') {
+            $body = json_encode(array(
+                'model'      => $model,
+                'max_tokens' => 4096,
+                'messages'   => array(array('role' => 'user', 'content' => $prompt)),
+            ));
+            $headers = array(
+                'Content-Type: application/json',
+                'x-api-key: ' . $api_key,
+                'anthropic-version: 2023-06-01',
+            );
+        } else {
+            $body = json_encode(array(
+                'model'       => $model,
+                'messages'    => array(
+                    array('role' => 'system', 'content' => 'You are a professional translator. You translate text accurately and naturally while preserving formatting.'),
+                    array('role' => 'user', 'content' => $prompt),
+                ),
+                'temperature' => 0.3,
+                'max_tokens'  => 4096,
+            ));
+            $headers = array(
+                'Content-Type: application/json',
+                'Authorization: Bearer ' . $api_key,
+            );
+        }
+
+        return array(
+            'url'     => $api_url,
+            'headers' => $headers,
+            'body'    => $body,
+            'engine'  => $engine,
+        );
+    }
+
+    /**
+     * 解析 API 原始响应（curl_multi 场景使用）
+     */
+    private static function parse_api_raw_response($response_body, $http_code, $engine) {
+        $data = json_decode($response_body, true);
+
+        if ($http_code !== 200) {
+            $error_msg = isset($data['error']['message']) ? $data['error']['message'] : 'API error';
+            return new WP_Error('api_error', $error_msg . ' (HTTP ' . $http_code . ')');
+        }
+
+        if ($engine === 'claude') {
+            if (isset($data['content'][0]['text'])) {
+                return $data['content'][0]['text'];
+            }
+            return new WP_Error('invalid_response', 'Claude API 返回格式无效');
+        }
+
+        if (isset($data['choices'][0]['message']['content'])) {
+            return $data['choices'][0]['message']['content'];
+        }
+        return new WP_Error('invalid_response', 'API 返回格式无效');
+    }
+
+    /**
+     * curl_multi 并发执行（内部）
+     */
+    private static function execute_parallel_requests($prompts, $chunk_texts, $engine, $max_concurrency = 5) {
+        $results = array();
+        $prompt_keys = array_keys($prompts);
+
+        // 分批并发（尊重 max_concurrency）
+        $batches = array_chunk($prompt_keys, max(1, $max_concurrency));
+
+        foreach ($batches as $batch_keys) {
+            $mh = curl_multi_init();
+            $handles = array();
+            $errors  = array();
+
+            foreach ($batch_keys as $idx) {
+                $req = self::build_api_request_params($prompts[$idx], $engine);
+                if (is_wp_error($req)) {
+                    $errors[$idx] = $req;
+                    continue;
+                }
+
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, $req['url']);
+                curl_setopt($ch, CURLOPT_POST, true);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $req['body']);
+                curl_setopt($ch, CURLOPT_HTTPHEADER, $req['headers']);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+                curl_multi_add_handle($mh, $ch);
+                $handles[$idx] = $ch;
+            }
+
+            // 执行所有并发请求
+            do {
+                $status = curl_multi_exec($mh, $running);
+                if ($running > 0) {
+                    curl_multi_select($mh, 1);
+                }
+            } while ($running > 0 && $status === CURLM_OK);
+
+            // 收集结果
+            foreach ($batch_keys as $idx) {
+                if (isset($errors[$idx])) {
+                    $results[$idx] = array('translations' => array(), 'error' => $errors[$idx]);
+                    continue;
+                }
+                if (!isset($handles[$idx])) {
+                    $results[$idx] = array('translations' => array(), 'error' => new WP_Error('no_handle', '请求未建立'));
+                    continue;
+                }
+
+                $ch = $handles[$idx];
+                $http_code     = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                $response_body = curl_multi_getcontent($ch);
+                $curl_error    = curl_error($ch);
+
+                curl_multi_remove_handle($mh, $ch);
+                curl_close($ch);
+
+                if (!empty($curl_error)) {
+                    $results[$idx] = array('translations' => array(), 'error' => new WP_Error('curl_error', $curl_error));
+                    continue;
+                }
+
+                $text_result = self::parse_api_raw_response($response_body, $http_code, $engine);
+                if (is_wp_error($text_result)) {
+                    $results[$idx] = array('translations' => array(), 'error' => $text_result);
+                    continue;
+                }
+
+                $parsed = self::parse_batch_result($text_result, $chunk_texts[$idx]);
+                $results[$idx] = array('translations' => $parsed, 'error' => null);
+            }
+
+            curl_multi_close($mh);
+        }
+
+        return $results;
+    }
+
     /**
      * 测试API连接
      */
