@@ -28,8 +28,26 @@
                 $(this).closest('.fanyi2-switcher').toggleClass('open');
             });
 
-            // 语言选项链接已有真实 URL + data-fanyi2-lang，
-            // 点击后直接由浏览器导航，无需 JS 拦截或 AJAX
+            $(document).on('click', '.fanyi2-lang-option, .fanyi2-flag-option', function() {
+                var lang = $(this).data('lang') || $(this).data('fanyi2-lang');
+                if (lang) {
+                    Fanyi2Frontend.persistManualLanguage(lang);
+                }
+            });
+
+            $(document).on('change', '.fanyi2-switcher-select', function() {
+                var $selected = $(this).find('option:selected');
+                var lang = $selected.data('lang');
+                var url = $selected.val();
+
+                if (lang) {
+                    Fanyi2Frontend.persistManualLanguage(lang);
+                }
+
+                if (url) {
+                    window.location.href = url;
+                }
+            });
 
             // 点击外部关闭
             $(document).on('click', function() {
@@ -49,6 +67,7 @@
          * 内置切换器已使用真实 URL，此方法仅作为公开 API 保留
          */
         switchLanguage: function(lang) {
+            Fanyi2Frontend.persistManualLanguage(lang);
             Fanyi2Frontend.redirectToLanguage(lang);
         },
 
@@ -102,6 +121,27 @@
             }
 
             window.location.href = url.toString();
+        },
+
+        persistManualLanguage: function(lang) {
+            var maxAge = 365 * 24 * 60 * 60;
+            var path = '/';
+
+            if (typeof fanyi2_vars !== 'undefined' && fanyi2_vars.cookie_path) {
+                path = fanyi2_vars.cookie_path;
+            }
+
+            if (!path) {
+                path = '/';
+            }
+
+            path = path.replace(/\/+$/, '') || '/';
+            if (path !== '/') {
+                path += '/';
+            }
+
+            document.cookie = 'fanyi2_language=' + encodeURIComponent(lang) + '; path=' + path + '; max-age=' + maxAge + '; SameSite=Lax';
+            document.cookie = 'fanyi2_language_source=manual; path=' + path + '; max-age=' + maxAge + '; SameSite=Lax';
         }
     };
 

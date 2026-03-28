@@ -3,7 +3,7 @@
  * Plugin Name: Fanyi2 - AI 智能翻译
  * Plugin URI: https://github.com/fanyi2
  * Description: 类似TranslatePress的WordPress多语言翻译插件，支持前端可视化翻译、DeepSeek/千问AI翻译、浏览器语言自动切换、兼容woo-huilv汇率插件
- * Version: 9.1
+ * Version: 9.2
  * Author: Fanyi2
  * Author URI: https://github.com/fanyi2
  * License: GPL v2 or later
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 }
 
 // 插件常量
-define('FANYI2_VERSION', '9.1');
+define('FANYI2_VERSION', '9.2');
 define('FANYI2_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FANYI2_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('FANYI2_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -142,6 +142,7 @@ final class Fanyi2 {
             'fanyi2_custom_api_url'    => '',
             'fanyi2_custom_model'      => '',
             'fanyi2_auto_detect_browser' => '1',
+            'fanyi2_force_default_language_cleanup' => '0',
             'fanyi2_url_mode' => 'parameter', // parameter or subdirectory
             'fanyi2_batch_size' => 30,
             'fanyi2_switcher_position' => 'bottom-right', // bottom-right, bottom-left, top-right, top-left
@@ -166,6 +167,7 @@ final class Fanyi2 {
         Fanyi2_Ajax::init();
         Fanyi2_Frontend::init();
         Fanyi2_Currency::init();
+        Fanyi2_Batch::register_cleanup_hooks();
 
         if (is_admin()) {
             Fanyi2_Admin::init();
@@ -201,6 +203,7 @@ final class Fanyi2 {
         }
 
         $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+        $_SERVER['FANYI2_ORIGINAL_REQUEST_URI'] = $request_uri;
         $path = parse_url($request_uri, PHP_URL_PATH);
         $home_path = parse_url(home_url(), PHP_URL_PATH);
         $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
@@ -239,11 +242,7 @@ final class Fanyi2 {
         if (!empty($segments[0]) && in_array($segments[0], $languages) && $segments[0] !== $default_lang) {
             $detected_lang = $segments[0];
 
-            // 设置 cookie 以便语言检测使用
-            if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $detected_lang) {
-                setcookie('fanyi2_language', $detected_lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
-            }
-            $_COOKIE['fanyi2_language'] = $detected_lang;
+            Fanyi2_Frontend::set_current_language_cookie($detected_lang);
 
             // 从 REQUEST_URI 中移除语言前缀，让 WordPress 正常路由
             array_shift($segments);
@@ -269,13 +268,6 @@ final class Fanyi2 {
                 }
                 return Fanyi2_Frontend::get_language_url($detected_lang, $redirect_url);
             }, 10, 1);
-        } else {
-            // 无语言前缀 = 默认语言，必须重置 cookie
-            // 避免上一次非默认语言页面留下的 cookie 导致语言"粘滞"
-            if (isset($_COOKIE['fanyi2_language']) && $_COOKIE['fanyi2_language'] !== $default_lang) {
-                setcookie('fanyi2_language', $default_lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
-            }
-            $_COOKIE['fanyi2_language'] = $default_lang;
         }
     }
 
@@ -317,11 +309,7 @@ final class Fanyi2 {
             add_action('template_redirect', function() {
                 $lang = get_query_var('fanyi2_lang');
                 if (!empty($lang)) {
-                    // 设置cookie
-                    if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $lang) {
-                        setcookie('fanyi2_language', $lang, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
-                        $_COOKIE['fanyi2_language'] = $lang;
-                    }
+                    Fanyi2_Frontend::set_current_language_cookie($lang);
                 }
             }, 0);
         }
@@ -362,6 +350,7 @@ final class Fanyi2 {
             'is_rtl'           => $is_rtl ? '1' : '0',
             'language_names'   => Fanyi2_Frontend::get_language_names(),
             'language_flags'   => Fanyi2_Frontend::get_language_flags(),
+            'cookie_path'      => parse_url(home_url('/'), PHP_URL_PATH),
         ));
 
         // 可视化翻译编辑器（管理员且开启编辑模式时）

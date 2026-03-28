@@ -11,6 +11,7 @@ class Fanyi2_Frontend {
 
     private static $current_language = null;
     private static $locale_switched = false;
+    private static $cookie_lifetime = 31536000;
 
     /**
      * 初始化
@@ -19,6 +20,7 @@ class Fanyi2_Frontend {
         add_action('init', array(__CLASS__, 'maybe_switch_wordpress_locale'), 0);
         add_action('wp_footer', array(__CLASS__, 'render_language_switcher'));
         add_action('wp_footer', array(__CLASS__, 'render_editor_toolbar'));
+        add_action('template_redirect', array(__CLASS__, 'maybe_redirect_detected_language'), 0);
         add_action('template_redirect', array(__CLASS__, 'detect_and_set_language'), 1);
 
         // 输出缓冲替换翻译
@@ -90,8 +92,15 @@ class Fanyi2_Frontend {
             $language = sanitize_text_field($_GET['lang']);
         }
 
+        if (empty($language) && function_exists('get_query_var')) {
+            $query_lang = get_query_var('fanyi2_lang');
+            if (!empty($query_lang)) {
+                $language = sanitize_text_field($query_lang);
+            }
+        }
+
         if (empty($language) && $url_mode === 'subdirectory') {
-            $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+            $request_uri = self::get_request_uri_for_detection();
             $req_path = parse_url($request_uri, PHP_URL_PATH);
             $home_path = parse_url(home_url(), PHP_URL_PATH);
             $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
@@ -108,8 +117,12 @@ class Fanyi2_Frontend {
             }
         }
 
-        if (empty($language) && isset($_COOKIE['fanyi2_language'])) {
-            $language = sanitize_text_field($_COOKIE['fanyi2_language']);
+        if (empty($language) && self::should_force_default_cleanup_context()) {
+            return $default_lang;
+        }
+
+        if (empty($language)) {
+            $language = self::get_language_cookie(true, $enabled);
         }
 
         if (empty($language)) {
@@ -121,6 +134,211 @@ class Fanyi2_Frontend {
         }
 
         return $language;
+    }
+
+    /**
+     * 手动偏好 cookie 名称
+     */
+    public static function get_language_source_cookie_name() {
+        return 'fanyi2_language_source';
+    }
+
+    /**
+     * 语言 cookie 名称
+     */
+    public static function get_language_cookie_name() {
+        return 'fanyi2_language';
+    }
+
+    /**
+     * 设置当前语言 cookie（不改变来源）
+     */
+    public static function set_current_language_cookie($language) {
+        $language = sanitize_text_field((string) $language);
+        if ($language === '') {
+            return;
+        }
+
+        $path = self::get_cookie_path();
+        $expires = time() + self::$cookie_lifetime;
+        setcookie(self::get_language_cookie_name(), $language, $expires, $path, COOKIE_DOMAIN);
+        $_COOKIE[self::get_language_cookie_name()] = $language;
+    }
+
+    /**
+     * 设置用户手动语言偏好
+     */
+    public static function set_language_preference($language, $source = 'manual') {
+        $language = sanitize_text_field((string) $language);
+        $source = sanitize_text_field((string) $source);
+        if ($language === '') {
+            return;
+        }
+
+        $path = self::get_cookie_path();
+        $expires = time() + self::$cookie_lifetime;
+
+        setcookie(self::get_language_cookie_name(), $language, $expires, $path, COOKIE_DOMAIN);
+        setcookie(self::get_language_source_cookie_name(), $source, $expires, $path, COOKIE_DOMAIN);
+
+        $_COOKIE[self::get_language_cookie_name()] = $language;
+        $_COOKIE[self::get_language_source_cookie_name()] = $source;
+    }
+
+    /**
+     * 是否存在手动语言偏好
+     */
+    public static function has_manual_language_preference() {
+        return (isset($_COOKIE[self::get_language_source_cookie_name()]) && $_COOKIE[self::get_language_source_cookie_name()] === 'manual');
+    }
+
+    /**
+     * 获取 cookie 中的语言
+     */
+    public static function get_language_cookie($require_manual = false, $enabled = array()) {
+        $cookie_name = self::get_language_cookie_name();
+        if (!isset($_COOKIE[$cookie_name])) {
+            return null;
+        }
+
+        if ($require_manual && !self::has_manual_language_preference()) {
+            return null;
+        }
+
+        $language = sanitize_text_field((string) $_COOKIE[$cookie_name]);
+        if ($language === '') {
+            return null;
+        }
+
+        if (!empty($enabled) && !in_array($language, $enabled, true)) {
+            return null;
+        }
+
+        return $language;
+    }
+
+    /**
+     * 当前请求是否应启动输出缓冲处理
+     */
+    public static function should_process_current_request() {
+        $current_lang = self::get_current_language();
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $force_cleanup = get_option('fanyi2_force_default_language_cleanup', '0');
+
+        return ($current_lang !== $default_lang || $force_cleanup === '1' || self::should_force_default_cleanup_context());
+    }
+
+    /**
+     * 当前请求是否显式指定了语言
+     */
+    public static function has_explicit_language_context() {
+        $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+
+        if (isset($_GET['lang']) && in_array(sanitize_text_field($_GET['lang']), $enabled, true)) {
+            return true;
+        }
+
+        if (function_exists('get_query_var')) {
+            $query_lang = get_query_var('fanyi2_lang');
+            if (!empty($query_lang) && in_array(sanitize_text_field($query_lang), $enabled, true)) {
+                return true;
+            }
+        }
+
+        $request_uri = self::get_request_uri_for_detection();
+        $request_path = parse_url($request_uri, PHP_URL_PATH);
+        $home_path = parse_url(home_url(), PHP_URL_PATH);
+        $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
+        $relative = $request_path;
+
+        if ($home_path_clean && strpos((string) $request_path, $home_path_clean) === 0) {
+            $relative = substr((string) $request_path, strlen($home_path_clean));
+        }
+
+        $relative = ltrim((string) $relative, '/');
+        $segments = explode('/', $relative);
+        $first_segment = !empty($segments[0]) ? $segments[0] : '';
+        if ($first_segment !== '' && in_array($first_segment, $enabled, true)) {
+            return true;
+        }
+
+        return self::has_manual_language_preference();
+    }
+
+    /**
+     * 开启默认语言清洗后，默认 URL 场景强制按默认语言渲染
+     */
+    public static function should_force_default_cleanup_context() {
+        if (get_option('fanyi2_force_default_language_cleanup', '0') !== '1') {
+            return false;
+        }
+
+        return !self::has_explicit_language_context();
+    }
+
+    /**
+     * 子目录模式下，根据手动偏好或浏览器语言自动跳转
+     */
+    public static function maybe_redirect_detected_language() {
+        if (get_option('fanyi2_url_mode', 'parameter') !== 'subdirectory') {
+            return;
+        }
+
+        if (self::should_force_default_cleanup_context()) {
+            return;
+        }
+
+        if (is_admin() || wp_doing_ajax()) {
+            return;
+        }
+
+        if (defined('REST_REQUEST') && REST_REQUEST) {
+            return;
+        }
+
+        $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper((string) $_SERVER['REQUEST_METHOD']) : 'GET';
+        if (!in_array($method, array('GET', 'HEAD'), true)) {
+            return;
+        }
+
+        $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $request_uri = self::get_request_uri_for_detection();
+        $request_path = parse_url($request_uri, PHP_URL_PATH);
+        $home_path = parse_url(home_url(), PHP_URL_PATH);
+        $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
+        $relative = $request_path;
+
+        if ($home_path_clean && strpos((string) $request_path, $home_path_clean) === 0) {
+            $relative = substr((string) $request_path, strlen($home_path_clean));
+        }
+
+        $relative = ltrim((string) $relative, '/');
+        $segments = explode('/', $relative);
+        $first_segment = !empty($segments[0]) ? $segments[0] : '';
+
+        if ($first_segment !== '' && in_array($first_segment, $enabled, true)) {
+            return;
+        }
+
+        $preferred_lang = self::get_language_cookie(true, $enabled);
+        if (empty($preferred_lang)) {
+            $preferred_lang = Fanyi2_IP_Detector::detect_language();
+        }
+
+        if (empty($preferred_lang) || !in_array($preferred_lang, $enabled, true) || $preferred_lang === $default_lang) {
+            return;
+        }
+
+        $current_url = home_url(add_query_arg(array()));
+        $target_url = self::get_language_url($preferred_lang, $current_url);
+
+        if (untrailingslashit($current_url) === untrailingslashit($target_url)) {
+            return;
+        }
+
+        wp_safe_redirect($target_url, 302, 'Fanyi2');
+        exit;
     }
 
     /**
@@ -177,7 +395,7 @@ class Fanyi2_Frontend {
         $url_mode = get_option('fanyi2_url_mode', 'parameter');
         $default_lang = get_option('fanyi2_default_language', 'zh');
         $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
-        $url_determined = false; // 标记 URL 是否明确指定了语言
+        $url_determined = false;
 
         // 1. URL参数 (?lang=xx)
         if (isset($_GET['lang'])) {
@@ -185,19 +403,18 @@ class Fanyi2_Frontend {
             $url_determined = true;
         }
 
-        // 2. 子目录模式
-        if (empty($language) && $url_mode === 'subdirectory') {
-            // handle_subdirectory_request() 在 init 阶段已将检测到的语言写入 cookie
-            if (isset($_COOKIE['fanyi2_language']) && in_array($_COOKIE['fanyi2_language'], $enabled)) {
-                $cookie_lang = sanitize_text_field($_COOKIE['fanyi2_language']);
-            } else {
-                $cookie_lang = $default_lang;
+        // 2. rewrite query var
+        if (empty($language) && function_exists('get_query_var')) {
+            $query_lang = get_query_var('fanyi2_lang');
+            if (!empty($query_lang)) {
+                $language = sanitize_text_field($query_lang);
+                $url_determined = true;
             }
+        }
 
-            // 检查原始 REQUEST_URI 是否包含语言前缀
-            // 注意：handle_subdirectory_request 已经修改了 $_SERVER['REQUEST_URI']，
-            // 所以这里通过 cookie 是否在本次请求中被设为非默认来判断
-            $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+        // 3. 子目录模式
+        if (empty($language) && $url_mode === 'subdirectory') {
+            $request_uri = self::get_request_uri_for_detection();
             $req_path = parse_url($request_uri, PHP_URL_PATH);
             $home_path = parse_url(home_url(), PHP_URL_PATH);
             $home_path_clean = $home_path ? rtrim($home_path, '/') : '';
@@ -209,33 +426,27 @@ class Fanyi2_Frontend {
             $segments = explode('/', $relative);
             $first_seg = !empty($segments[0]) ? $segments[0] : '';
 
-            // 如果 URL 中仍有语言前缀（未被 handle_subdirectory_request 剥离，
-            // 比如 rewrite 阶段晚于 init），使用它
-            if (in_array($first_seg, $enabled) && $first_seg !== $default_lang) {
+            if (in_array($first_seg, $enabled, true)) {
                 $language = $first_seg;
-            } elseif ($cookie_lang !== $default_lang) {
-                // cookie 从 handle_subdirectory_request 传来
-                $language = $cookie_lang;
-            } else {
-                // 无语言前缀 => 默认语言
-                $language = $default_lang;
+                $url_determined = true;
             }
-
-            // 子目录模式下 URL 始终是确定性的
-            $url_determined = true;
         }
 
-        // 3. Cookie（仅参数模式可回退）
-        if (empty($language) && !$url_determined && isset($_COOKIE['fanyi2_language'])) {
-            $language = sanitize_text_field($_COOKIE['fanyi2_language']);
+        // 4. 手动偏好 cookie
+        if (empty($language) && !$url_determined) {
+            $language = self::get_language_cookie(true, $enabled);
         }
 
-        // 4. 浏览器语言检测
+        if (empty($language) && self::should_force_default_cleanup_context()) {
+            $language = $default_lang;
+        }
+
+        // 5. 浏览器语言检测
         if (empty($language)) {
             $language = Fanyi2_IP_Detector::detect_language();
         }
 
-        // 5. 默认语言
+        // 6. 默认语言
         if (empty($language)) {
             $language = $default_lang;
         }
@@ -247,25 +458,19 @@ class Fanyi2_Frontend {
 
         self::$current_language = $language;
 
-        // 设置 Cookie
-        if (!isset($_COOKIE['fanyi2_language']) || $_COOKIE['fanyi2_language'] !== $language) {
-            setcookie('fanyi2_language', $language, time() + (365 * DAY_IN_SECONDS), COOKIEPATH, COOKIE_DOMAIN);
-        }
+        self::set_current_language_cookie($language);
     }
 
     /**
      * 开始翻译输出缓冲
      */
     public static function start_translation_buffer() {
-        $current_lang = self::get_current_language();
-        $default_lang = get_option('fanyi2_default_language', 'zh');
-
         // 编辑器模式不翻译
         if (isset($_GET['fanyi2_editor'])) {
             return;
         }
 
-        if ($current_lang !== $default_lang) {
+        if (self::should_process_current_request()) {
             ob_start(array('Fanyi2_Translator', 'process_output'));
         }
     }
@@ -275,13 +480,31 @@ class Fanyi2_Frontend {
      */
     public static function get_current_language() {
         if (self::$current_language === null) {
-            // 在init之前调用时的处理
             if (isset($_GET['lang'])) {
                 return sanitize_text_field($_GET['lang']);
             }
-            if (isset($_COOKIE['fanyi2_language'])) {
-                return sanitize_text_field($_COOKIE['fanyi2_language']);
+
+            if (function_exists('get_query_var')) {
+                $query_lang = get_query_var('fanyi2_lang');
+                if (!empty($query_lang)) {
+                    return sanitize_text_field($query_lang);
+                }
             }
+
+            $manual_lang = self::get_language_cookie(true);
+            if (!empty($manual_lang)) {
+                return $manual_lang;
+            }
+
+            if (self::should_force_default_cleanup_context()) {
+                return get_option('fanyi2_default_language', 'zh');
+            }
+
+            $detected_lang = Fanyi2_IP_Detector::detect_language();
+            if (!empty($detected_lang)) {
+                return $detected_lang;
+            }
+
             return get_option('fanyi2_default_language', 'zh');
         }
         return self::$current_language;
@@ -345,13 +568,13 @@ class Fanyi2_Frontend {
                     <?php endforeach; ?>
                 </div>
             <?php elseif ($style === 'minimal'): ?>
-                <select class="fanyi2-switcher-select" onchange="if(this.value)location.href=this.value">
+                <select class="fanyi2-switcher-select">
                     <?php foreach ($enabled_languages as $lang):
                         $url = self::get_language_url($lang);
                         $lang_name = $language_names[$lang] ?? $lang;
                         $lang_flag = $language_flags[$lang] ?? '';
                     ?>
-                        <option value="<?php echo esc_url($url); ?>" <?php selected($lang, $current_language); ?>>
+                        <option value="<?php echo esc_url($url); ?>" data-lang="<?php echo esc_attr($lang); ?>" <?php selected($lang, $current_language); ?>>
                             <?php echo esc_html(trim(($lang_flag !== '' ? $lang_flag . ' ' : '') . $lang_name)); ?>
                         </option>
                     <?php endforeach; ?>
@@ -701,6 +924,31 @@ class Fanyi2_Frontend {
             'hi' => '🇮🇳',
             'bn' => '🇧🇩',
         );
+    }
+
+    /**
+     * 获取 cookie path
+     */
+    private static function get_cookie_path() {
+        if (defined('COOKIEPATH') && COOKIEPATH) {
+            return COOKIEPATH;
+        }
+
+        $home_path = parse_url(home_url('/'), PHP_URL_PATH);
+        $home_path = is_string($home_path) ? rtrim($home_path, '/') : '';
+
+        return ($home_path === '') ? '/' : $home_path . '/';
+    }
+
+    /**
+     * 获取用于语言检测的原始请求 URI
+     */
+    private static function get_request_uri_for_detection() {
+        if (!empty($_SERVER['FANYI2_ORIGINAL_REQUEST_URI'])) {
+            return (string) $_SERVER['FANYI2_ORIGINAL_REQUEST_URI'];
+        }
+
+        return isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
     }
 
     /**

@@ -9,6 +9,16 @@ if (!defined('ABSPATH')) {
 
 class Fanyi2_Batch {
 
+    private static $syncing_option_cleanup = false;
+
+    /**
+     * 注册默认语言数据库同步钩子
+     */
+    public static function register_cleanup_hooks() {
+        add_action('customize_save_after', array(__CLASS__, 'sync_after_customizer_save'), 20);
+        add_action('updated_option', array(__CLASS__, 'maybe_sync_updated_option'), 20, 3);
+    }
+
     /**
      * 扫描站点抓取所有文本（直接查询数据库，不依赖 HTTP 请求）
      */
@@ -17,6 +27,7 @@ class Fanyi2_Batch {
 
         // 1. 直接从数据库扫描所有内容（可靠，不依赖 HTTP loopback）
         $total_strings += self::scan_database_content();
+        $total_strings += self::scan_database_options();
 
         // 2. 注册 WooCommerce 通用界面字符串
         if (class_exists('WooCommerce')) {
@@ -163,12 +174,50 @@ class Fanyi2_Batch {
     }
 
     /**
+     * 深度扫描 wp_options / theme mods / widgets 等数据库文案
+     */
+    public static function scan_database_options() {
+        global $wpdb;
+
+        $table_options = $wpdb->options;
+        $rows = $wpdb->get_results(
+            "SELECT option_name, option_value, autoload
+             FROM $table_options
+             WHERE autoload = 'yes'
+                OR option_name LIKE 'theme_mods_%'
+                OR option_name LIKE 'widget_%'
+                OR option_name LIKE 'woocommerce_%'
+                OR option_name LIKE 'elementor_%'"
+        );
+
+        if (empty($rows)) {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ($rows as $row) {
+            $option_name = (string) $row->option_name;
+            $autoload = isset($row->autoload) ? (string) $row->autoload : 'no';
+
+            if (!self::should_scan_option_name($option_name, $autoload)) {
+                continue;
+            }
+
+            $value = maybe_unserialize($row->option_value);
+            $domain = self::resolve_option_domain($option_name);
+            $count += self::register_strings_from_option_value($value, $option_name, $domain);
+        }
+
+        return $count;
+    }
+
+    /**
      * 注册单个字符串到数据库
      * 直接调用 get_or_create_string 即可，由其内部决定新建或补全元数据
      */
     private static function register_single_string($text, $element_type = 'text', $page_url = '', $domain = 'general') {
         $text = trim($text);
-        if (empty($text) || mb_strlen($text) < 2 || !preg_match('/[\p{L}]/u', $text)) {
+        if (empty($text) || mb_strlen($text) < 2 || !preg_match('/[\p{L}]/u', $text) || self::is_probably_code_like($text)) {
             return 0;
         }
         $obj = Fanyi2_Database::get_or_create_string($text, array(
@@ -177,6 +226,430 @@ class Fanyi2_Batch {
             'page_url'     => $page_url,
         ));
         return $obj ? 1 : 0;
+    }
+
+    /**
+     * 递归注册 option/theme_mod/widget 中的字符串
+     */
+    private static function register_strings_from_option_value($value, $option_name, $domain = 'general', $path = array(), $depth = 0) {
+        if ($depth > 6) {
+            return 0;
+        }
+
+        $count = 0;
+
+        if (is_array($value)) {
+            foreach ($value as $key => $child) {
+                $child_path = $path;
+                $child_path[] = is_scalar($key) ? sanitize_key((string) $key) : 'item';
+                $count += self::register_strings_from_option_value($child, $option_name, $domain, $child_path, $depth + 1);
+            }
+            return $count;
+        }
+
+        if (is_object($value)) {
+            foreach (get_object_vars($value) as $key => $child) {
+                $child_path = $path;
+                $child_path[] = sanitize_key((string) $key);
+                $count += self::register_strings_from_option_value($child, $option_name, $domain, $child_path, $depth + 1);
+            }
+            return $count;
+        }
+
+        if (!is_string($value)) {
+            return 0;
+        }
+
+        if (!self::is_probably_display_text($value, $option_name, $path)) {
+            return 0;
+        }
+
+        $selector = $option_name;
+        if (!empty($path)) {
+            $selector .= ':' . implode('.', array_filter($path));
+        }
+
+        $plain_text = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $plain_text = preg_replace('/<!--.*?-->/s', '', $plain_text);
+        $plain_text = strip_shortcodes($plain_text);
+        $plain_text = wp_strip_all_tags($plain_text);
+        $segments = preg_split('/[\r\n]+/', $plain_text);
+
+        foreach ((array) $segments as $segment) {
+            $segment = trim((string) $segment);
+            if ($segment === '' || mb_strlen($segment) < 2 || mb_strlen($segment) > 800 || !preg_match('/[\p{L}]/u', $segment) || self::is_probably_code_like($segment)) {
+                continue;
+            }
+
+            $obj = Fanyi2_Database::get_or_create_string($segment, array(
+                'domain'       => $domain,
+                'element_type' => 'option_text',
+                'page_url'     => '',
+                'selector'     => $selector,
+            ));
+
+            if ($obj) {
+                $count++;
+            }
+        }
+
+        return $count;
+    }
+
+    /**
+     * option 是否值得扫描
+     */
+    private static function should_scan_option_name($option_name, $autoload = 'no') {
+        $option_name_lc = strtolower((string) $option_name);
+
+        if ($option_name_lc === '') {
+            return false;
+        }
+
+        $skip_prefixes = array(
+            '_transient_',
+            '_site_transient_',
+            'fanyi2_',
+            'rewrite_rules',
+            'cron',
+            'can_compress_scripts',
+            'dismissed_wp_pointers',
+        );
+        foreach ($skip_prefixes as $prefix) {
+            if (strpos($option_name_lc, $prefix) === 0) {
+                return false;
+            }
+        }
+
+        $skip_contains = array(
+            'api_key', 'apikey', 'secret', 'token', 'license', 'nonce', 'hash',
+            'smtp', 'mailgun', 'recaptcha', 'access_key', 'private_key',
+        );
+        foreach ($skip_contains as $needle) {
+            if (strpos($option_name_lc, $needle) !== false) {
+                return false;
+            }
+        }
+
+        if ($autoload === 'yes') {
+            return true;
+        }
+
+        return (
+            strpos($option_name_lc, 'theme_mods_') === 0
+            || strpos($option_name_lc, 'widget_') === 0
+            || strpos($option_name_lc, 'woocommerce_') === 0
+            || strpos($option_name_lc, 'elementor_') === 0
+        );
+    }
+
+    /**
+     * 粗略判断字符串是否像前端展示文案
+     */
+    private static function is_probably_display_text($text, $option_name, $path = array()) {
+        $raw = trim((string) $text);
+        if ($raw === '') {
+            return false;
+        }
+
+        $normalized = html_entity_decode($raw, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        $normalized = trim((string) wp_strip_all_tags($normalized));
+
+        if ($normalized === '' || mb_strlen($normalized) < 2 || mb_strlen($normalized) > 800) {
+            return false;
+        }
+
+        if (!preg_match('/[\p{L}]/u', $normalized)) {
+            return false;
+        }
+
+        if (self::is_probably_code_like($normalized)) {
+            return false;
+        }
+
+        if (filter_var($normalized, FILTER_VALIDATE_URL) || filter_var($normalized, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        if (preg_match('/^\[[^\]]+\]$/', $normalized)) {
+            return false;
+        }
+
+        if (preg_match('/^(#[0-9a-f]{3,8}|[a-z0-9_\-\/\.]+\.(?:png|jpe?g|gif|svg|webp|css|js|woff2?|ttf))$/i', $normalized)) {
+            return false;
+        }
+
+        if (preg_match('/^[a-f0-9]{24,}$/i', $normalized)) {
+            return false;
+        }
+
+        $hint = strtolower($option_name . ' ' . implode(' ', array_map('strval', (array) $path)));
+        $deny_keywords = array(
+            'color', 'font', 'size', 'width', 'height', 'padding', 'margin', 'radius',
+            'border', 'background', 'image', 'icon', 'logo', 'attachment', 'media',
+            'slug', 'path', 'file', 'css', 'scss', 'script', 'javascript', 'endpoint',
+            'rest', 'html', 'json', 'schema', 'lat', 'lng', 'phone', 'email'
+        );
+        $allow_keywords = array(
+            'title', 'label', 'text', 'content', 'description', 'subtitle', 'heading',
+            'button', 'cta', 'message', 'notice', 'placeholder', 'caption',
+            'announcement', 'tagline', 'footer', 'header'
+        );
+
+        $has_allow = false;
+        foreach ($allow_keywords as $keyword) {
+            if (strpos($hint, $keyword) !== false) {
+                $has_allow = true;
+                break;
+            }
+        }
+
+        if (!$has_allow) {
+            foreach ($deny_keywords as $keyword) {
+                if (strpos($hint, $keyword) !== false) {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * 粗略识别代码 / 配置片段，避免污染翻译库
+     */
+    private static function is_probably_code_like($text) {
+        $text = trim((string) $text);
+        if ($text === '') {
+            return false;
+        }
+
+        $patterns = array(
+            '/^\s*(var|let|const)\s+[A-Za-z_$][\w$]*\s*=/u',
+            '/^\s*(?:\(?function\b|\(\s*function\b)/u',
+            '/^\s*:root\s*\{/u',
+            '/^\s*[.#][A-Za-z0-9_\-:>\s,\[\]="\'\(\)]+\{[^}]+\}\s*$/u',
+            '/--[a-z0-9\-]+\s*:/iu',
+            '/(?:wp-admin\/admin-ajax\.php|wc-ajax=|cart_hash_key|fragment_name|request_timeout)/iu',
+        );
+
+        foreach ($patterns as $pattern) {
+            if (preg_match($pattern, $text)) {
+                return true;
+            }
+        }
+
+        if (strpos($text, '{') !== false && strpos($text, '}') !== false) {
+            if (preg_match('/[;=]/', $text) || preg_match('/"[A-Za-z0-9_\-]+"\s*:/u', $text)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * 解析 option 所属 domain
+     */
+    private static function resolve_option_domain($option_name) {
+        $option_name_lc = strtolower((string) $option_name);
+
+        if (strpos($option_name_lc, 'woocommerce_') === 0) {
+            return 'woocommerce';
+        }
+
+        if (strpos($option_name_lc, 'theme_mods_') === 0 || strpos($option_name_lc, 'widget_') === 0) {
+            return 'general';
+        }
+
+        return 'general';
+    }
+
+    /**
+     * 自定义器发布后，把已存在的默认语言清洗结果回写到底层 option
+     */
+    public static function sync_after_customizer_save() {
+        self::sync_default_language_option_texts();
+    }
+
+    /**
+     * 指定 option 更新后同步默认语言底层值
+     */
+    public static function maybe_sync_updated_option($option_name, $old_value, $value) {
+        if (self::$syncing_option_cleanup) {
+            return;
+        }
+
+        if (get_option('fanyi2_force_default_language_cleanup', '0') !== '1') {
+            return;
+        }
+
+        if (!self::should_scan_option_name($option_name, 'no')) {
+            return;
+        }
+
+        self::sync_default_language_option_texts(array((string) $option_name));
+    }
+
+    /**
+     * 将默认语言的已保存译文回写到 theme_mods / widgets / options
+     */
+    public static function sync_default_language_option_texts($option_names = array()) {
+        if (get_option('fanyi2_force_default_language_cleanup', '0') !== '1') {
+            return array(
+                'options_updated'     => 0,
+                'option_values_fixed' => 0,
+            );
+        }
+
+        $default_language = get_option('fanyi2_default_language', 'zh');
+        $rows = Fanyi2_Database::get_option_cleanup_translations($default_language, (array) $option_names);
+        if (empty($rows)) {
+            return array(
+                'options_updated'     => 0,
+                'option_values_fixed' => 0,
+            );
+        }
+
+        $grouped = array();
+        foreach ($rows as $row) {
+            if (empty($row->selector) || empty($row->translated_string)) {
+                continue;
+            }
+
+            $parts = explode(':', (string) $row->selector, 2);
+            $option_name = isset($parts[0]) ? (string) $parts[0] : '';
+            if ($option_name === '') {
+                continue;
+            }
+
+            $path = array();
+            if (!empty($parts[1])) {
+                $path = array_values(array_filter(explode('.', $parts[1]), 'strlen'));
+            }
+
+            $grouped[$option_name][] = array(
+                'path'       => $path,
+                'original'   => (string) $row->original_string,
+                'translated' => (string) $row->translated_string,
+            );
+        }
+
+        $options_updated = 0;
+        $option_values_fixed = 0;
+
+        foreach ($grouped as $option_name => $translations) {
+            $option_value = get_option($option_name, null);
+            if ($option_value === null) {
+                continue;
+            }
+
+            $original_snapshot = maybe_serialize($option_value);
+            foreach ($translations as $translation) {
+                $option_values_fixed += self::replace_option_value_by_selector(
+                    $option_value,
+                    $translation['path'],
+                    $translation['original'],
+                    $translation['translated']
+                );
+            }
+
+            if (maybe_serialize($option_value) !== $original_snapshot) {
+                self::$syncing_option_cleanup = true;
+                update_option($option_name, $option_value, false);
+                self::$syncing_option_cleanup = false;
+                $options_updated++;
+            }
+        }
+
+        return array(
+            'options_updated'     => $options_updated,
+            'option_values_fixed' => $option_values_fixed,
+        );
+    }
+
+    /**
+     * 按 selector path 回写 option 值
+     */
+    private static function replace_option_value_by_selector(&$value, $path, $original, $translated) {
+        $original_normalized = Fanyi2_Database::normalize_string($original);
+        if ($original_normalized === '' || $translated === '') {
+            return 0;
+        }
+
+        $replaced = 0;
+        if (!empty($path)) {
+            $replaced = self::replace_option_value_at_path($value, $path, $original_normalized, $translated);
+        }
+
+        if ($replaced > 0) {
+            return $replaced;
+        }
+
+        return self::replace_option_value_recursively($value, $original_normalized, $translated);
+    }
+
+    /**
+     * 按精确路径尝试替换 option 值
+     */
+    private static function replace_option_value_at_path(&$value, $path, $original_normalized, $translated) {
+        if (empty($path)) {
+            if (is_string($value) && Fanyi2_Database::normalize_string($value) === $original_normalized && $value !== $translated) {
+                $value = $translated;
+                return 1;
+            }
+            return 0;
+        }
+
+        $segment = array_shift($path);
+
+        if (is_array($value)) {
+            foreach ($value as $key => &$child) {
+                if ((string) $key === $segment || sanitize_key((string) $key) === $segment) {
+                    return self::replace_option_value_at_path($child, $path, $original_normalized, $translated);
+                }
+            }
+            return 0;
+        }
+
+        if (is_object($value)) {
+            foreach (get_object_vars($value) as $key => $child) {
+                if ((string) $key === $segment || sanitize_key((string) $key) === $segment) {
+                    return self::replace_option_value_at_path($value->$key, $path, $original_normalized, $translated);
+                }
+            }
+        }
+
+        return 0;
+    }
+
+    /**
+     * 递归兜底替换 option 中完全匹配的字符串
+     */
+    private static function replace_option_value_recursively(&$value, $original_normalized, $translated) {
+        if (is_string($value)) {
+            if (Fanyi2_Database::normalize_string($value) === $original_normalized && $value !== $translated) {
+                $value = $translated;
+                return 1;
+            }
+            return 0;
+        }
+
+        $replaced = 0;
+        if (is_array($value)) {
+            foreach ($value as &$child) {
+                $replaced += self::replace_option_value_recursively($child, $original_normalized, $translated);
+            }
+            return $replaced;
+        }
+
+        if (is_object($value)) {
+            foreach (get_object_vars($value) as $key => $child) {
+                $replaced += self::replace_option_value_recursively($value->$key, $original_normalized, $translated);
+            }
+        }
+
+        return $replaced;
     }
 
     /**

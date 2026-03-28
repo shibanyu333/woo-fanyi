@@ -21,6 +21,10 @@ class Fanyi2_Translator {
     private static $persistent_cache_group = 'fanyi2_trans';
     private static $runtime_registered_hashes = array();
     private static $wc_hooks_registered = false;
+    private static $default_cleanup_cache = array();
+    private static $default_cleanup_normalized_cache = array();
+    private static $default_cleanup_loaded = false;
+    private static $default_cleanup_stats = array();
 
     /**
      * 初始化（保留供外部调用；输出缓冲已由 Fanyi2_Frontend::start_translation_buffer 启动）
@@ -39,7 +43,7 @@ class Fanyi2_Translator {
         }
         self::$wc_hooks_registered = true;
 
-        $should_translate = self::should_translate_current_request();
+        $should_transform = self::should_transform_current_request();
 
         // --- gettext 级别拦截：覆盖 WooCommerce 核心翻译 ---
         add_filter('gettext', array(__CLASS__, 'filter_gettext'), 10, 3);
@@ -53,7 +57,7 @@ class Fanyi2_Translator {
         // --- Woo Blocks / Store API 响应兜底翻译（购物车/结账区块） ---
         add_filter('rest_pre_echo_response', array(__CLASS__, 'filter_store_api_response'), 10, 3);
 
-        if (!$should_translate) {
+        if (!$should_transform) {
             return;
         }
 
@@ -121,8 +125,9 @@ class Fanyi2_Translator {
 
         $current_lang = Fanyi2_Frontend::get_current_language();
         $default_lang = get_option('fanyi2_default_language', 'zh');
+        $cleanup_default = self::should_cleanup_default_request();
 
-        if ($current_lang === $default_lang) {
+        if ($current_lang === $default_lang && !$cleanup_default) {
             return $html;
         }
 
@@ -131,11 +136,15 @@ class Fanyi2_Translator {
             return $html;
         }
 
-        // 1. 翻译文本内容
-        $html = self::translate_html($html, $current_lang);
+        if ($cleanup_default) {
+            $html = self::translate_html($html, $default_lang);
+        } else {
+            // 1. 翻译文本内容
+            $html = self::translate_html($html, $current_lang);
 
-        // 2. 重写内部链接（加上语言标识）
-        $html = self::rewrite_internal_urls($html, $current_lang);
+            // 2. 重写内部链接（加上语言标识）
+            $html = self::rewrite_internal_urls($html, $current_lang);
+        }
 
         return $html;
     }
@@ -211,6 +220,28 @@ class Fanyi2_Translator {
         $default_lang = get_option('fanyi2_default_language', 'zh');
 
         return (!empty($current_lang) && $current_lang !== $default_lang);
+    }
+
+    /**
+     * 当前请求是否应执行默认语言清洗
+     */
+    private static function should_cleanup_default_request() {
+        $current_lang = Fanyi2_Frontend::get_current_language();
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $force_cleanup = get_option('fanyi2_force_default_language_cleanup', '0');
+
+        return ($force_cleanup === '1'
+            && (
+                (!empty($current_lang) && $current_lang === $default_lang)
+                || Fanyi2_Frontend::should_force_default_cleanup_context()
+            ));
+    }
+
+    /**
+     * 当前请求是否需要执行文本转换
+     */
+    private static function should_transform_current_request() {
+        return (self::should_translate_current_request() || self::should_cleanup_default_request());
     }
 
     /**
@@ -298,7 +329,7 @@ class Fanyi2_Translator {
             return $translations;
         }
 
-        $should_translate = self::should_translate_current_request();
+        $should_translate = self::should_transform_current_request();
         $changed = false;
         $capture_domain = $is_woo_domain ? (string) $domain : 'woocommerce';
 
@@ -400,6 +431,11 @@ class Fanyi2_Translator {
             return;
         }
 
+        // 后台编辑器/设置页会产生大量不需要的运行期文案，避免污染前台翻译队列
+        if (is_admin() && !wp_doing_ajax()) {
+            return;
+        }
+
         $text = trim($text);
         if (mb_strlen($text) < 2 || mb_strlen($text) > 300) {
             return;
@@ -421,6 +457,11 @@ class Fanyi2_Translator {
             $domain = 'woocommerce';
         }
 
+        $page_url = self::get_runtime_capture_page_url();
+        if ($page_url === '' && !wp_doing_ajax()) {
+            return;
+        }
+
         $hash = md5($domain . '|' . $context . '|' . $text);
         if (isset(self::$runtime_registered_hashes[$hash])) {
             return;
@@ -431,8 +472,20 @@ class Fanyi2_Translator {
             'domain'       => $domain,
             'context'      => (string) $context,
             'element_type' => 'gettext',
-            'page_url'     => '',
+            'page_url'     => $page_url,
         ));
+    }
+
+    /**
+     * 获取运行期抓取字符串所属的前台页面 URL
+     */
+    private static function get_runtime_capture_page_url() {
+        if (is_admin() && !wp_doing_ajax()) {
+            return '';
+        }
+
+        $url = home_url(add_query_arg(array()));
+        return is_string($url) ? sanitize_url($url) : '';
     }
 
     /**
@@ -496,9 +549,122 @@ class Fanyi2_Translator {
     }
 
     /**
+     * 预加载默认语言清洗映射：译文 -> 默认语言原文
+     */
+    private static function preload_default_cleanup_map() {
+        if (self::$default_cleanup_loaded) {
+            return;
+        }
+        self::$default_cleanup_loaded = true;
+
+        $cache_key = 'fanyi2_default_cleanup_map_v1';
+        $cached = wp_cache_get($cache_key, self::$persistent_cache_group);
+        if (is_array($cached)
+            && isset($cached['raw'])
+            && isset($cached['normalized'])
+            && isset($cached['stats'])
+            && is_array($cached['raw'])
+            && is_array($cached['normalized'])
+            && is_array($cached['stats'])) {
+            self::$default_cleanup_cache = $cached['raw'];
+            self::$default_cleanup_normalized_cache = $cached['normalized'];
+            self::$default_cleanup_stats = $cached['stats'];
+            return;
+        }
+
+        $cached = get_transient($cache_key);
+        if (is_array($cached)
+            && isset($cached['raw'])
+            && isset($cached['normalized'])
+            && isset($cached['stats'])
+            && is_array($cached['raw'])
+            && is_array($cached['normalized'])
+            && is_array($cached['stats'])) {
+            self::$default_cleanup_cache = $cached['raw'];
+            self::$default_cleanup_normalized_cache = $cached['normalized'];
+            self::$default_cleanup_stats = $cached['stats'];
+            wp_cache_set($cache_key, $cached, self::$persistent_cache_group, 300);
+            return;
+        }
+
+        global $wpdb;
+        $table_strings = $wpdb->prefix . Fanyi2_Database::TABLE_STRINGS;
+        $table_trans   = $wpdb->prefix . Fanyi2_Database::TABLE_TRANSLATIONS;
+        $default_lang  = Fanyi2_Database::resolve_translation_language(get_option('fanyi2_default_language', 'zh'));
+
+        $results = $wpdb->get_results($wpdb->prepare(
+            "SELECT s.original_string, t.translated_string, t.language
+             FROM {$table_trans} t
+             INNER JOIN {$table_strings} s ON t.string_id = s.id
+             WHERE t.status = 'published' AND s.status = 'active' AND t.language <> %s
+             ORDER BY t.updated_at DESC",
+            $default_lang
+        ));
+
+        $raw_map = array();
+        $raw_conflicts = array();
+        $norm_map = array();
+        $norm_conflicts = array();
+
+        foreach ($results as $row) {
+            $original = (string) $row->original_string;
+            $translated = trim((string) $row->translated_string);
+            $normalized_original = Fanyi2_Database::normalize_string($original);
+            $normalized_translated = Fanyi2_Database::normalize_string($translated);
+
+            if ($translated === '' || $normalized_original === '' || $normalized_translated === '') {
+                continue;
+            }
+
+            if ($normalized_original === $normalized_translated) {
+                continue;
+            }
+
+            if (!isset($raw_conflicts[$translated])) {
+                if (!isset($raw_map[$translated])) {
+                    $raw_map[$translated] = $original;
+                } elseif ($raw_map[$translated] !== $original) {
+                    unset($raw_map[$translated]);
+                    $raw_conflicts[$translated] = true;
+                }
+            }
+
+            if (!isset($norm_conflicts[$normalized_translated])) {
+                if (!isset($norm_map[$normalized_translated])) {
+                    $norm_map[$normalized_translated] = $original;
+                } elseif ($norm_map[$normalized_translated] !== $original) {
+                    unset($norm_map[$normalized_translated]);
+                    $norm_conflicts[$normalized_translated] = true;
+                }
+            }
+        }
+
+        self::$default_cleanup_cache = $raw_map;
+        self::$default_cleanup_normalized_cache = $norm_map;
+        self::$default_cleanup_stats = array(
+            'published_translations' => count($results),
+            'raw_mappings'           => count($raw_map),
+            'normalized_mappings'    => count($norm_map),
+            'raw_conflicts'          => count($raw_conflicts),
+            'normalized_conflicts'   => count($norm_conflicts),
+        );
+
+        $payload = array(
+            'raw'        => $raw_map,
+            'normalized' => $norm_map,
+            'stats'      => self::$default_cleanup_stats,
+        );
+
+        wp_cache_set($cache_key, $payload, self::$persistent_cache_group, 300);
+        set_transient($cache_key, $payload, 300);
+    }
+
+    /**
      * 清除翻译缓存（翻译保存/删除后调用）
      */
     public static function clear_translation_cache($lang = '') {
+        $default_cleanup_cache_key = 'fanyi2_default_cleanup_map_v1';
+
         if ($lang) {
             $canonical_lang = Fanyi2_Database::resolve_translation_language($lang);
             $cache_keys = array('fanyi2_all_' . $canonical_lang);
@@ -526,8 +692,25 @@ class Fanyi2_Translator {
                 delete_transient($cache_key);
             }
         }
+
+        wp_cache_delete($default_cleanup_cache_key, self::$persistent_cache_group);
+        delete_transient($default_cleanup_cache_key);
         self::$gettext_cache = array();
         self::$persistent_cache_loaded = false;
+        self::$default_cleanup_cache = array();
+        self::$default_cleanup_normalized_cache = array();
+        self::$default_cleanup_loaded = false;
+        self::$default_cleanup_stats = array();
+    }
+
+    /**
+     * 重建默认语言清洗缓存并返回统计
+     */
+    public static function rebuild_default_cleanup_cache() {
+        self::clear_translation_cache();
+        self::preload_default_cleanup_map();
+
+        return self::$default_cleanup_stats;
     }
 
     /**
@@ -539,20 +722,28 @@ class Fanyi2_Translator {
             return $text;
         }
 
+        if (self::should_cleanup_default_request()) {
+            return self::lookup_translation_from_cache($text);
+        }
+
         if (!self::should_translate_current_request()) {
             return $text;
         }
 
-        // 确保翻译已预加载
+        return self::lookup_translation_from_cache($text);
+    }
+
+    /**
+     * 从预加载缓存查找翻译
+     */
+    private static function lookup_translation_from_cache($text) {
         self::preload_translations();
 
-        // 通过哈希快速查找
         $hash = md5($text);
         if (isset(self::$gettext_cache[$hash])) {
             return self::$gettext_cache[$hash];
         }
 
-        // 兼容 HTML 实体/空白差异（常见于块 JSON 文案）
         $normalized = trim((string) preg_replace('/\s+/u', ' ', html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
         if ($normalized !== '' && $normalized !== $text) {
             $hash = md5($normalized);
@@ -561,7 +752,6 @@ class Fanyi2_Translator {
             }
         }
 
-        // 未命中：没有这条翻译
         return $text;
     }
 
@@ -838,6 +1028,71 @@ class Fanyi2_Translator {
     }
 
     // ====== HTML 输出缓冲翻译 ======
+
+    /**
+     * 默认语言清洗 HTML
+     */
+    private static function cleanup_html_to_default($html) {
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        return self::translate_html($html, $default_lang);
+    }
+
+    /**
+     * 清洗含内联标签的块级元素
+     */
+    private static function cleanup_block_elements_to_default($html) {
+        if (empty(self::$default_cleanup_cache) && empty(self::$default_cleanup_normalized_cache)) {
+            return $html;
+        }
+
+        $new_html = preg_replace_callback(
+            '/<(p|h[1-6]|li|td|th|option|button|label|figcaption|dt|dd|caption|summary)(\b[^>]*)>(.*?)<\/\1>/si',
+            function ($matches) {
+                $tag = $matches[1];
+                $attrs = $matches[2];
+                $inner = $matches[3];
+
+                if (strip_tags($inner) === $inner) {
+                    return $matches[0];
+                }
+
+                $stripped = trim(wp_strip_all_tags(html_entity_decode($inner, ENT_QUOTES | ENT_HTML5, 'UTF-8')));
+                if ($stripped === '' || mb_strlen($stripped) < 2) {
+                    return $matches[0];
+                }
+
+                $replacement = self::find_default_cleanup_replacement($stripped);
+                if (!empty($replacement) && $replacement !== $stripped) {
+                    return '<' . $tag . $attrs . '>' . esc_html($replacement) . '</' . $tag . '>';
+                }
+
+                return $matches[0];
+            },
+            $html
+        );
+
+        return ($new_html !== null) ? $new_html : $html;
+    }
+
+    /**
+     * 查找默认语言清洗替换值
+     */
+    private static function find_default_cleanup_replacement($text) {
+        if (!is_string($text) || $text === '') {
+            return null;
+        }
+
+        if (isset(self::$default_cleanup_cache[$text])) {
+            return self::$default_cleanup_cache[$text];
+        }
+
+        $normalized = Fanyi2_Database::normalize_string($text);
+        if ($normalized !== '' && isset(self::$default_cleanup_normalized_cache[$normalized])) {
+            return self::$default_cleanup_normalized_cache[$normalized];
+        }
+
+        return null;
+    }
 
     /**
      * 翻译HTML内容

@@ -24,6 +24,10 @@
                 Fanyi2Admin.testApi(engine, '.fanyi2-test-result[data-engine="' + engine + '"]');
             });
 
+            $('#fanyi2-run-translation-cleanup').on('click', function() {
+                Fanyi2Admin.runTranslationCleanup();
+            });
+
             // 引擎选择切换 - 显示/隐藏对应设置面板
             $('input[name="fanyi2_ai_engine"]').on('change', function() {
                 Fanyi2Admin.toggleEngineSettings();
@@ -44,6 +48,10 @@
             // 翻译所有语言
             $('#fanyi2-translate-all-langs').on('click', function() {
                 Fanyi2Admin.translateAllLanguages();
+            });
+
+            $('#fanyi2-clear-target-language').on('click', function() {
+                Fanyi2Admin.clearTargetLanguageTranslations();
             });
 
             // 切换目标语言/翻译范围时加载最近进度
@@ -218,6 +226,56 @@
             });
         },
 
+        runTranslationCleanup: function() {
+            var $btn = $('#fanyi2-run-translation-cleanup');
+            var $result = $('#fanyi2-translation-cleanup-result');
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_run_translation_cleanup',
+                    nonce: fanyi2_admin.nonce
+                },
+                beforeSend: function() {
+                    $btn.prop('disabled', true).text('清洗中...');
+                    $result.text('正在扫描站点并执行 AI 清洗...').css('color', '#666');
+                },
+                success: function(response) {
+                    $btn.prop('disabled', false).text('🧹 立即执行翻译清洗');
+
+                    if (!response.success) {
+                        $result.text(response.data && response.data.message ? response.data.message : '翻译清洗失败').css('color', '#b91c1c');
+                        Fanyi2Admin.showAdminNotice('error', response.data && response.data.message ? response.data.message : '翻译清洗失败');
+                        return;
+                    }
+
+                    var stats = response.data && response.data.stats ? response.data.stats : {};
+                    var warnings = response.data && response.data.warnings ? response.data.warnings : [];
+                    var summary = '已完成。扫描 ' + (stats.scanned || 0) +
+                        ' 条，识别候选 ' + (stats.candidates || 0) +
+                        ' 条，记忆复用 ' + (stats.reused_from_memory || 0) +
+                        ' 条，AI 清洗 ' + (stats.ai_translated || 0) +
+                        ' 条，保留原文 ' + (stats.kept_original || 0) +
+                        ' 条，回写设置 ' + (stats.option_values_fixed || 0) +
+                        ' 处，更新选项 ' + (stats.options_updated || 0) +
+                        ' 个，失败 ' + (stats.failed || 0) + ' 条';
+
+                    if (warnings.length > 0) {
+                        summary += '。警告：' + warnings[0];
+                    }
+
+                    $result.text(summary).css('color', '#166534');
+                    Fanyi2Admin.showAdminNotice('success', summary);
+                },
+                error: function() {
+                    $btn.prop('disabled', false).text('🧹 立即执行翻译清洗');
+                    $result.text('翻译清洗请求失败').css('color', '#b91c1c');
+                    Fanyi2Admin.showAdminNotice('error', '翻译清洗请求失败');
+                }
+            });
+        },
+
         /**
          * 扫描站点
          */
@@ -258,7 +316,7 @@
         startPretranslate: function() {
             var targetLang = $('#fanyi2-batch-target-lang').val();
             var scope = this.getPretranslateScope();
-            var batchSize = 500;
+            var batchSize = this.getConfiguredBatchSize();
             var $btn = $('#fanyi2-start-pretranslate');
 
             $btn.prop('disabled', true).text('翻译中...');
@@ -270,9 +328,17 @@
         normalizeBatchSize: function(value) {
             var size = parseInt(value, 10);
             if (isNaN(size) || size <= 0) {
-                size = 500;
+                size = 50;
             }
             return Math.max(50, Math.min(500, size));
+        },
+
+        getConfiguredBatchSize: function() {
+            var configured = 50;
+            if (fanyi2_admin && fanyi2_admin.settings && fanyi2_admin.settings.batch_size) {
+                configured = fanyi2_admin.settings.batch_size;
+            }
+            return this.normalizeBatchSize(configured);
         },
 
         getPretranslateScope: function() {
@@ -338,6 +404,30 @@
             });
         },
 
+        fetchPretranslateProgress: function(language, scope, callback) {
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_get_pretranslate_progress',
+                    nonce: fanyi2_admin.nonce,
+                    language: language,
+                    scope: scope
+                },
+                timeout: 60000,
+                success: function(response) {
+                    if (response.success && response.data) {
+                        callback(response.data.progress || null);
+                        return;
+                    }
+                    callback(null);
+                },
+                error: function() {
+                    callback(null);
+                }
+            });
+        },
+
         runPretranslateBatch: function(targetLang, scope, batchSize, totalTranslated, stalledRetries) {
             var self = this;
             stalledRetries = parseInt(stalledRetries || 0, 10);
@@ -361,9 +451,25 @@
                         var translatedTotal = parseInt(response.data.translated_total || totalTranslated, 10);
                         var totalStrings = parseInt(response.data.total_strings || (translatedTotal + remaining), 10);
                         var status = response.data.status || (remaining > 0 ? 'running' : 'completed');
+                        var warnings = response.data.warnings || [];
 
                         if (status === 'running' && remaining > 0) {
                             var translatedThisRound = parseInt(response.data.translated || 0, 10);
+                            var severeBatchWarning = warnings.some(function(w) {
+                                return w.indexOf('批量未返回') !== -1 || w.indexOf('时间上限') !== -1;
+                            });
+
+                            if (severeBatchWarning && batchSize > 50) {
+                                var loweredBatchSize = Math.max(50, Math.floor(batchSize / 2));
+                                var percentWarningRetry = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
+                                $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentWarningRetry + '%');
+                                $('.fanyi2-pretranslate-status').text('⚠ 批量返回不稳定，自动降批到 ' + loweredBatchSize + ' 继续...');
+                                setTimeout(function() {
+                                    self.runPretranslateBatch(targetLang, scope, loweredBatchSize, totalTranslated, 0);
+                                }, 250);
+                                return;
+                            }
+
                             if (translatedThisRound <= 0) {
                                 var nextBatchOnRunning = Math.max(10, Math.floor(batchSize / 2));
                                 if (stalledRetries < 3 && nextBatchOnRunning < batchSize) {
@@ -417,8 +523,8 @@
                             Fanyi2Admin.showAdminNotice('error', '本轮未推进，且自动重试未恢复。请重试或调小每批数量。');
                         }
 
-                        if (response.data.warnings && response.data.warnings.length && status !== 'running') {
-                            Fanyi2Admin.showAdminNotice('error', '部分批次出现警告：' + response.data.warnings.join(' | '));
+                        if (warnings.length && status !== 'running') {
+                            Fanyi2Admin.showAdminNotice('error', '部分批次出现警告：' + warnings.join(' | '));
                         }
                     } else {
                         $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
@@ -448,7 +554,7 @@
             var enabledLangs = fanyi2_admin.settings.enabled_languages;
             var defaultLang = fanyi2_admin.settings.default_language;
             var scope = this.getPretranslateScope();
-            var batchSize = 500;
+            var batchSize = this.getConfiguredBatchSize();
 
             var targetLangs = enabledLangs.filter(function(lang) {
                 return lang !== defaultLang;
@@ -473,13 +579,27 @@
 
                 var lang = targetLangs[langIndex];
                 var langName = fanyi2_admin.languages[lang] || lang;
-                $('.fanyi2-pretranslate-status').text('正在翻译 ' + langName + ' (' + (langIndex + 1) + '/' + targetLangs.length + ')...');
+                $('.fanyi2-pretranslate-status').text('检查 ' + langName + ' (' + (langIndex + 1) + '/' + targetLangs.length + ') 的翻译进度...');
 
-                self.pretranslateLanguage(lang, scope, batchSize, function() {
-                    langIndex++;
-                    var percent = Math.round((langIndex / targetLangs.length) * 100);
-                    $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percent + '%');
-                    processNextLang();
+                self.fetchPretranslateProgress(lang, scope, function(progress) {
+                    var remaining = progress ? parseInt(progress.remaining || 0, 10) : 0;
+
+                    if (progress && remaining <= 0) {
+                        langIndex++;
+                        var skipPercent = Math.round((langIndex / targetLangs.length) * 100);
+                        $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', skipPercent + '%');
+                        $('.fanyi2-pretranslate-status').text('跳过 ' + langName + '，该语言已全部翻译完成');
+                        setTimeout(processNextLang, 100);
+                        return;
+                    }
+
+                    $('.fanyi2-pretranslate-status').text('正在翻译 ' + langName + ' (' + (langIndex + 1) + '/' + targetLangs.length + ')...');
+                    self.pretranslateLanguage(lang, scope, batchSize, function() {
+                        langIndex++;
+                        var percent = Math.round((langIndex / targetLangs.length) * 100);
+                        $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percent + '%');
+                        processNextLang();
+                    });
                 });
             };
 
@@ -512,6 +632,47 @@
                 },
                 error: function() {
                     callback();
+                }
+            });
+        },
+
+        clearTargetLanguageTranslations: function() {
+            var targetLang = $('#fanyi2-batch-target-lang').val();
+            var langName = fanyi2_admin.languages[targetLang] || targetLang;
+
+            if (!targetLang) {
+                this.showAdminNotice('error', '请先选择目标语言');
+                return;
+            }
+
+            if (!confirm('确定要清空 ' + langName + ' 的全部翻译吗？此操作不可撤销。')) {
+                return;
+            }
+
+            var $btn = $('#fanyi2-clear-target-language');
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_clear_language_translations',
+                    nonce: fanyi2_admin.nonce,
+                    language: targetLang
+                },
+                beforeSend: function() {
+                    $btn.prop('disabled', true).text('清空中...');
+                },
+                success: function(response) {
+                    $btn.prop('disabled', false).text('🗑️ 清空当前目标语言翻译');
+                    if (response.success) {
+                        Fanyi2Admin.showAdminNotice('success', response.data.message || '已清空目标语言翻译');
+                        Fanyi2Admin.loadPretranslateProgress();
+                    } else {
+                        Fanyi2Admin.showAdminNotice('error', response.data && response.data.message ? response.data.message : '清空失败');
+                    }
+                },
+                error: function() {
+                    $btn.prop('disabled', false).text('🗑️ 清空当前目标语言翻译');
+                    Fanyi2Admin.showAdminNotice('error', '清空目标语言翻译失败');
                 }
             });
         },

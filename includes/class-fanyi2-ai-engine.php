@@ -266,8 +266,20 @@ class Fanyi2_AI_Engine {
      */
     private static function build_prompt($text, $target_language, $source_language) {
         $lang_names = self::get_language_full_names();
-        $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
         $target_name = isset($lang_names[$target_language]) ? $lang_names[$target_language] : $target_language;
+        $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
+
+        if ($source_language === 'auto') {
+            return "You are a professional translator. Detect the source language automatically and translate the following text to {$target_name}. " .
+                   "Rules:\n" .
+                   "1. Only return the translated text, nothing else.\n" .
+                   "2. Preserve HTML tags, placeholders, and special characters.\n" .
+                   "3. Keep the same tone and style.\n" .
+                   "4. Do not add any explanation or notes.\n" .
+                   "5. If the text is already in {$target_name}, return it unchanged.\n" .
+                   "6. If the text contains technical terms, brand names, model names, or product names, keep those parts as-is when appropriate.\n\n" .
+                   "Text to translate:\n{$text}";
+        }
 
         return "You are a professional translator. Translate the following text from {$source_name} to {$target_name}. " .
                "Rules:\n" .
@@ -284,16 +296,36 @@ class Fanyi2_AI_Engine {
      */
     private static function build_batch_prompt($combined_text, $count, $target_language, $source_language) {
         $lang_names = self::get_language_full_names();
-        $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
         $target_name = isset($lang_names[$target_language]) ? $lang_names[$target_language] : $target_language;
+        $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
+
+        if ($source_language === 'auto') {
+            return "You are a professional translator. Detect the source language automatically and translate the following {$count} numbered texts to {$target_name}. " .
+                   "Rules:\n" .
+                   "1. Return ONLY valid JSON.\n" .
+                   "2. The JSON must be an array with exactly {$count} strings in the same order as the input.\n" .
+                   "3. Do not wrap the JSON in markdown code fences.\n" .
+                   "4. Preserve HTML tags, placeholders, and special characters.\n" .
+                   "5. Keep the same tone and style.\n" .
+                   "6. Do not add any explanation or notes.\n" .
+                   "7. If a text is already in {$target_name}, return it unchanged.\n" .
+                   "8. If a text contains technical terms, brand names, model names, or product names, keep those parts as-is when appropriate.\n\n" .
+                   "Example output format:\n" .
+                   "[\"Translation 1\", \"Translation 2\"]\n\n" .
+                   "Texts to translate:\n{$combined_text}";
+        }
 
         return "You are a professional translator. Translate the following {$count} numbered texts from {$source_name} to {$target_name}. " .
                "Rules:\n" .
-               "1. Return ONLY the translated texts, each on a new line, keeping the same numbering format (1. xxx\\n2. xxx).\n" .
-               "2. Preserve HTML tags, placeholders, and special characters.\n" .
-               "3. Keep the same tone and style.\n" .
-               "4. Do not add any explanation or notes.\n" .
-               "5. If the text contains technical terms or brand names, keep them as-is.\n\n" .
+               "1. Return ONLY valid JSON.\n" .
+               "2. The JSON must be an array with exactly {$count} strings in the same order as the input.\n" .
+               "3. Do not wrap the JSON in markdown code fences.\n" .
+               "4. Preserve HTML tags, placeholders, and special characters.\n" .
+               "5. Keep the same tone and style.\n" .
+               "6. Do not add any explanation or notes.\n" .
+               "7. If the text contains technical terms or brand names, keep them as-is.\n\n" .
+               "Example output format:\n" .
+               "[\"Translation 1\", \"Translation 2\"]\n\n" .
                "Texts to translate:\n{$combined_text}";
     }
 
@@ -469,25 +501,108 @@ class Fanyi2_AI_Engine {
      * 解析批量翻译结果
      */
     private static function parse_batch_result($result, $original_texts) {
-        $lines = explode("\n", trim($result));
+        $result = trim((string) $result);
         $translations = array();
         $keys = array_keys($original_texts);
-        $index = 0;
 
-        foreach ($lines as $line) {
-            $line = trim($line);
-            if (empty($line)) continue;
+        if ($result === '' || empty($keys)) {
+            return $translations;
+        }
 
-            // 去除编号前缀，如 "1. ", "2. " 等
-            $line = preg_replace('/^\d+\.\s*/', '', $line);
+        $json_payload = self::extract_batch_json_payload($result);
+        if ($json_payload !== null) {
+            $decoded = json_decode($json_payload, true);
+            if (is_array($decoded)) {
+                if (array_values($decoded) === $decoded) {
+                    foreach ($keys as $index => $key) {
+                        if (isset($decoded[$index])) {
+                            $translations[$key] = trim((string) $decoded[$index]);
+                        }
+                    }
+                } else {
+                    foreach ($keys as $index => $key) {
+                        $lookup_key = (string) ($index + 1);
+                        if (isset($decoded[$lookup_key])) {
+                            $translations[$key] = trim((string) $decoded[$lookup_key]);
+                        }
+                    }
+                }
+            }
 
-            if ($index < count($keys)) {
-                $translations[$keys[$index]] = $line;
-                $index++;
+            if (!empty($translations)) {
+                return $translations;
             }
         }
 
+        $lines = preg_split('/\r\n|\r|\n/', $result);
+        $current_index = null;
+        $buffers = array();
+
+        foreach ((array) $lines as $line) {
+            $line = rtrim((string) $line);
+            if ($line === '') {
+                continue;
+            }
+
+            if (preg_match('/^(\d+)\.\s*(.*)$/', trim($line), $matches)) {
+                $item_index = intval($matches[1]) - 1;
+                if ($item_index < 0 || !isset($keys[$item_index])) {
+                    continue;
+                }
+
+                $current_index = $item_index;
+                $buffers[$item_index] = trim((string) $matches[2]);
+                continue;
+            }
+
+            if ($current_index !== null) {
+                $buffers[$current_index] = trim($buffers[$current_index] . "\n" . trim($line));
+            }
+        }
+
+        foreach ($buffers as $index => $text) {
+            if (isset($keys[$index]) && $text !== '') {
+                $translations[$keys[$index]] = $text;
+            }
+        }
+
+        if (!empty($translations)) {
+            return $translations;
+        }
+
+        if (count($keys) === 1) {
+            $translations[$keys[0]] = preg_replace('/^\d+\.\s*/', '', $result);
+        }
+
         return $translations;
+    }
+
+    /**
+     * 从批量返回中提取 JSON 片段
+     */
+    private static function extract_batch_json_payload($result) {
+        $result = trim((string) $result);
+        if ($result === '') {
+            return null;
+        }
+
+        if (preg_match('/```(?:json)?\s*(\[.*\]|\{.*\})\s*```/su', $result, $matches)) {
+            return trim($matches[1]);
+        }
+
+        $first_square = strpos($result, '[');
+        $last_square = strrpos($result, ']');
+        if ($first_square !== false && $last_square !== false && $last_square > $first_square) {
+            return trim(substr($result, $first_square, $last_square - $first_square + 1));
+        }
+
+        $first_brace = strpos($result, '{');
+        $last_brace = strrpos($result, '}');
+        if ($first_brace !== false && $last_brace !== false && $last_brace > $first_brace) {
+            return trim(substr($result, $first_brace, $last_brace - $first_brace + 1));
+        }
+
+        return null;
     }
 
     /**

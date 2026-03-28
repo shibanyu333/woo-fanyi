@@ -101,6 +101,7 @@ class Fanyi2_Admin {
                 'enabled_languages' => get_option('fanyi2_enabled_languages', array()),
                 'ai_engine'         => get_option('fanyi2_ai_engine', 'deepseek'),
                 'auto_detect_browser' => get_option('fanyi2_auto_detect_browser', '1'),
+                'batch_size'        => intval(get_option('fanyi2_batch_size', 50)),
             ),
         ));
     }
@@ -407,7 +408,7 @@ class Fanyi2_Admin {
                 <!-- 扫描站点 -->
                 <div class="fanyi2-card">
                     <h2>📡 扫描站点文本</h2>
-                    <p>自动扫描数据库中所有页面、文章、产品、菜单、分类等内容，抓取需要翻译的文本。</p>
+                    <p>自动扫描数据库中所有页面、文章、产品、菜单、分类，以及主题自定义、Widgets、部分插件设置等内容，抓取需要翻译的文本。</p>
                     <button id="fanyi2-scan-site" class="button button-primary button-hero">
                         🔍 扫描整个站点
                     </button>
@@ -452,6 +453,10 @@ class Fanyi2_Admin {
                     <button id="fanyi2-translate-all-langs" class="button button-secondary button-hero">
                         🌐 翻译所有语言
                     </button>
+                    <button id="fanyi2-clear-target-language" class="button button-secondary button-hero">
+                        🗑️ 清空当前目标语言翻译
+                    </button>
+                    <p class="description" style="margin-top:8px;">重新翻译时会自动跳过该语言中已经存在的已发布译文；“翻译所有语言”也会自动跳过已全部翻完的语言。</p>
                     <div id="fanyi2-pretranslate-progress" style="display:none;margin-top:15px;">
                         <div class="fanyi2-progress-bar-bg">
                             <div class="fanyi2-progress-bar-fill" style="width:0%"></div>
@@ -658,7 +663,7 @@ class Fanyi2_Admin {
                                     <input type="password" name="fanyi2_qwen_api_key" 
                                            value="<?php echo esc_attr(get_option('fanyi2_qwen_api_key', '')); ?>"
                                            class="regular-text" placeholder="sk-...">
-                                    <p class="description">在 <a href="https://dashscope.console.aliyun.com/apiKey" target="_blank">阿里云DashScope控制台</a> 获取API Key</p>
+                                    <p class="description">在 <a href="https://bailian.console.aliyun.com/" target="_blank">阿里云百炼控制台</a> 获取 API Key。国内站点通常使用 <code>https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions</code>，国际站点请改成 <code>https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions</code>。</p>
                                 </td>
                             </tr>
                             <tr>
@@ -890,6 +895,23 @@ class Fanyi2_Admin {
                             </label>
                         </p>
                         <p class="description">首次访问时按以下优先级自动切换：浏览器语言 &gt; 国家映射 &gt; 英文(en) &gt; 网站默认语言。用户手动切换后会记住偏好。</p>
+                    </div>
+
+                    <div class="fanyi2-card">
+                        <h2>默认语言清洗</h2>
+                        <p>
+                            <label>
+                                <input type="checkbox" name="fanyi2_force_default_language_cleanup" value="1"
+                                       <?php checked(get_option('fanyi2_force_default_language_cleanup', '0'), '1'); ?>>
+                                默认语言页面强制统一为默认语言
+                            </label>
+                        </p>
+                        <p class="description">开启后，当前台处于默认语言时，插件会反向使用已保存的翻译记录，把前端中混入的英文或其他语言文案替换回默认语言。适用于主题自定义、WooCommerce 文案、部分文章输出和前端组件文案。</p>
+                        <p class="description">注意：该功能只能清洗数据库中已经存在对应翻译关系的文本；完全没有入库的陌生文案不会被自动还原。</p>
+                        <p style="margin-top:12px;">
+                            <button type="button" id="fanyi2-run-translation-cleanup" class="button button-secondary">🧹 立即执行翻译清洗</button>
+                            <span id="fanyi2-translation-cleanup-result" style="margin-left:10px;color:#666;"></span>
+                        </p>
                     </div>
 
                     <div class="fanyi2-card">
