@@ -542,30 +542,6 @@ class Fanyi2_Database {
     }
 
     /**
-     * 删除某一种语言的全部翻译
-     */
-    public static function delete_translations_for_language($language) {
-        global $wpdb;
-
-        $equivalent_languages = self::get_equivalent_translation_languages($language);
-        if (empty($equivalent_languages)) {
-            return 0;
-        }
-
-        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
-        $placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-
-        $sql = $wpdb->prepare(
-            "DELETE FROM $table_trans WHERE language IN ($placeholders)",
-            $equivalent_languages
-        );
-
-        $result = $wpdb->query($sql);
-
-        return is_numeric($result) ? intval($result) : 0;
-    }
-
-    /**
      * 获取统计信息
      */
     public static function get_stats() {
@@ -578,19 +554,8 @@ class Fanyi2_Database {
         $total_translations = (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_trans WHERE status = 'published'");
 
         $languages = get_option('fanyi2_enabled_languages', array());
-        $default_lang = get_option('fanyi2_default_language', 'zh');
         $lang_stats = array();
         foreach ($languages as $lang) {
-            if ($lang === $default_lang) {
-                $lang_stats[$lang] = array(
-                    'translated' => $total_strings,
-                    'total'      => $total_strings,
-                    'percent'    => $total_strings > 0 ? 100 : 0,
-                    'is_source'  => true,
-                );
-                continue;
-            }
-
             $equivalent_languages = self::get_equivalent_translation_languages($lang);
             $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
             $count = (int) $wpdb->get_var($wpdb->prepare(
@@ -601,7 +566,6 @@ class Fanyi2_Database {
                 'translated' => $count,
                 'total'      => $total_strings,
                 'percent'    => $total_strings > 0 ? round(($count / $total_strings) * 100, 1) : 0,
-                'is_source'  => false,
             );
         }
 
@@ -679,9 +643,14 @@ class Fanyi2_Database {
         }
         $home_sql = '(' . implode(' OR ', $home_parts) . ')';
 
-        // 产品：domain=products 或 page_url 含 /product/ 或产品相关 element_type
-        $products_sql = "(s.domain = 'products' OR s.page_url LIKE %s OR s.element_type IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value'))";
-        $products_params = array('%/product/%');
+        // 产品：domain=products 或 page_url 含 /product|/products|/shop|商品分类相关路径 或产品相关 element_type
+        $products_sql = "(s.domain = 'products'
+            OR s.page_url LIKE %s
+            OR s.page_url LIKE %s
+            OR s.page_url LIKE %s
+            OR s.page_url LIKE %s
+            OR s.element_type IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value'))";
+        $products_params = array('%/product/%', '%/products%', '%/shop%', '%/product-category/%');
 
         // WooCommerce：domain=woocommerce 或 wc 相关 element_type 或典型 WC 页面 URL
         $woocommerce_sql = "(s.domain = %s OR s.element_type LIKE %s OR s.element_type IN ('payment_gateway_title','payment_gateway_desc','payment_gateway_instructions','shipping_method_title','shipping_method_label','woocommerce_setting') OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s OR s.page_url LIKE %s)";
@@ -724,14 +693,6 @@ class Fanyi2_Database {
     }
 
     /**
-     * 进度与批量翻译队列仅统计真正可归属到前台页面的字符串。
-     * 历史数据里后台运行期 gettext 常以 page_url 为空落库，会严重污染进度与批量翻译。
-     */
-    private static function get_translation_queue_filter_sql() {
-        return " AND NOT (s.element_type = 'gettext' AND s.page_url = '')";
-    }
-
-    /**
      * 获取未翻译的字符串
      */
     public static function get_untranslated_strings($language, $limit = 50, $scope = 'all') {
@@ -748,7 +709,6 @@ class Fanyi2_Database {
         $results = $wpdb->get_results($wpdb->prepare(
             "SELECT s.* FROM $table_strings s
              WHERE s.status = 'active'
-               " . self::get_translation_queue_filter_sql() . "
                {$scope_conditions['sql']}
                AND NOT EXISTS (
                    SELECT 1 FROM $table_trans t
@@ -781,7 +741,6 @@ class Fanyi2_Database {
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_strings s
              WHERE s.status = 'active'
-               " . self::get_translation_queue_filter_sql() . "
                {$scope_conditions['sql']}
                AND NOT EXISTS (
                    SELECT 1 FROM $table_trans t
@@ -813,7 +772,6 @@ class Fanyi2_Database {
              WHERE t.language IN ($lang_placeholders)
                AND t.status = 'published'
                AND s.status = 'active'
-               " . self::get_translation_queue_filter_sql() . "
                {$scope_conditions['sql']}",
             $params
         ));
@@ -830,49 +788,13 @@ class Fanyi2_Database {
         $params = $scope_conditions['params'];
 
         if (empty($params)) {
-            return (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_strings s WHERE s.status = 'active'" . self::get_translation_queue_filter_sql() . " {$scope_conditions['sql']}");
+            return (int) $wpdb->get_var("SELECT COUNT(*) FROM $table_strings s WHERE s.status = 'active' {$scope_conditions['sql']}");
         }
 
         return (int) $wpdb->get_var($wpdb->prepare(
             "SELECT COUNT(*) FROM $table_strings s
              WHERE s.status = 'active'
-               " . self::get_translation_queue_filter_sql() . "
                {$scope_conditions['sql']}",
-            $params
-        ));
-    }
-
-    /**
-     * 获取默认语言清洗候选字符串
-     */
-    public static function get_default_cleanup_candidates($language, $limit = 0) {
-        global $wpdb;
-
-        $equivalent_languages = self::get_equivalent_translation_languages($language);
-        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
-        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
-        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-        $params = $equivalent_languages;
-
-        $limit_sql = '';
-        if (intval($limit) > 0) {
-            $limit_sql = ' LIMIT %d';
-            $params[] = intval($limit);
-        }
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT s.*
-             FROM $table_strings s
-             WHERE s.status = 'active'
-               AND s.domain <> 'products'
-               AND s.element_type NOT IN ('product_cat','product_cat_desc','product_tag','product_attr','attr_value')
-               AND NOT EXISTS (
-                   SELECT 1 FROM $table_trans t
-                   WHERE t.string_id = s.id
-                     AND t.language IN ($lang_placeholders)
-                     AND t.status = 'published'
-               )
-             ORDER BY s.updated_at DESC" . $limit_sql,
             $params
         ));
     }
@@ -912,46 +834,5 @@ class Fanyi2_Database {
         }
 
         return $map;
-    }
-
-    /**
-     * 获取可回写到 option/theme_mods 的默认语言译文
-     */
-    public static function get_option_cleanup_translations($language, $option_names = array()) {
-        global $wpdb;
-
-        $canonical_language = self::resolve_translation_language($language);
-        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
-        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
-        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
-        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
-        $params = array_merge($equivalent_languages, array($canonical_language));
-
-        $option_sql = '';
-        $option_names = array_values(array_filter(array_map('strval', (array) $option_names), 'strlen'));
-        if (!empty($option_names)) {
-            $parts = array();
-            foreach ($option_names as $option_name) {
-                $parts[] = 's.selector = %s';
-                $params[] = $option_name;
-                $parts[] = 's.selector LIKE %s';
-                $params[] = $option_name . ':%';
-            }
-            $option_sql = ' AND (' . implode(' OR ', $parts) . ')';
-        }
-
-        return $wpdb->get_results($wpdb->prepare(
-            "SELECT s.original_string, s.selector, t.translated_string, t.translation_source
-             FROM $table_trans t
-             INNER JOIN $table_strings s ON t.string_id = s.id
-             WHERE t.language IN ($lang_placeholders)
-               AND t.status = 'published'
-               AND s.status = 'active'
-               AND s.element_type = 'option_text'
-               AND s.selector <> ''
-               {$option_sql}
-             ORDER BY CASE WHEN t.language = %s THEN 0 ELSE 1 END, t.updated_at DESC",
-            $params
-        ));
     }
 }

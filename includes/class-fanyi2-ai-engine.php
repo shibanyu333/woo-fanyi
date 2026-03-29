@@ -10,10 +10,22 @@ if (!defined('ABSPATH')) {
 class Fanyi2_AI_Engine {
 
     /**
+     * 是否自动识别源语言
+     */
+    private static function is_auto_source_language($source_language) {
+        $source_language = strtolower(trim((string) $source_language));
+        return in_array($source_language, array('auto', 'detect', 'auto-detect', '*'), true);
+    }
+
+    /**
      * 翻译文本
      */
     public static function translate($text, $target_language, $source_language = 'zh', $engine = null) {
-        if (empty($text) || $target_language === $source_language) {
+        if (empty($text)) {
+            return $text;
+        }
+
+        if (!self::is_auto_source_language($source_language) && $target_language === $source_language) {
             return $text;
         }
 
@@ -45,6 +57,10 @@ class Fanyi2_AI_Engine {
     public static function translate_batch($texts, $target_language, $source_language = 'zh', $engine = null) {
         if (empty($texts)) {
             return array();
+        }
+
+        if (!self::is_auto_source_language($source_language) && $target_language === $source_language) {
+            return $texts;
         }
 
         if ($engine === null) {
@@ -159,14 +175,18 @@ class Fanyi2_AI_Engine {
         }
 
         $url = 'https://translation.googleapis.com/language/translate/v2';
+        $body = array(
+            'key'    => $api_key,
+            'q'      => $text,
+            'target' => self::get_google_lang_code($target_language),
+            'format' => 'html',
+        );
+        if (!self::is_auto_source_language($source_language)) {
+            $body['source'] = self::get_google_lang_code($source_language);
+        }
+
         $response = wp_remote_post($url, array(
-            'body' => array(
-                'key'    => $api_key,
-                'q'      => $text,
-                'source' => self::get_google_lang_code($source_language),
-                'target' => self::get_google_lang_code($target_language),
-                'format' => 'html',
-            ),
+            'body' => $body,
             'timeout' => 30,
         ));
 
@@ -211,10 +231,12 @@ class Fanyi2_AI_Engine {
 
         $body = array(
             'key'    => $api_key,
-            'source' => self::get_google_lang_code($source_language),
             'target' => self::get_google_lang_code($target_language),
             'format' => 'html',
         );
+        if (!self::is_auto_source_language($source_language)) {
+            $body['source'] = self::get_google_lang_code($source_language);
+        }
 
         // Google API 允许多个 q 参数
         $post_fields = http_build_query($body);
@@ -267,21 +289,13 @@ class Fanyi2_AI_Engine {
     private static function build_prompt($text, $target_language, $source_language) {
         $lang_names = self::get_language_full_names();
         $target_name = isset($lang_names[$target_language]) ? $lang_names[$target_language] : $target_language;
+        $auto_source = self::is_auto_source_language($source_language);
         $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
+        $source_clause = $auto_source
+            ? "by automatically detecting the source language into {$target_name}"
+            : "from {$source_name} to {$target_name}";
 
-        if ($source_language === 'auto') {
-            return "You are a professional translator. Detect the source language automatically and translate the following text to {$target_name}. " .
-                   "Rules:\n" .
-                   "1. Only return the translated text, nothing else.\n" .
-                   "2. Preserve HTML tags, placeholders, and special characters.\n" .
-                   "3. Keep the same tone and style.\n" .
-                   "4. Do not add any explanation or notes.\n" .
-                   "5. If the text is already in {$target_name}, return it unchanged.\n" .
-                   "6. If the text contains technical terms, brand names, model names, or product names, keep those parts as-is when appropriate.\n\n" .
-                   "Text to translate:\n{$text}";
-        }
-
-        return "You are a professional translator. Translate the following text from {$source_name} to {$target_name}. " .
+        return "You are a professional translator. Translate the following text {$source_clause}. " .
                "Rules:\n" .
                "1. Only return the translated text, nothing else.\n" .
                "2. Preserve HTML tags, placeholders, and special characters.\n" .
@@ -297,35 +311,19 @@ class Fanyi2_AI_Engine {
     private static function build_batch_prompt($combined_text, $count, $target_language, $source_language) {
         $lang_names = self::get_language_full_names();
         $target_name = isset($lang_names[$target_language]) ? $lang_names[$target_language] : $target_language;
+        $auto_source = self::is_auto_source_language($source_language);
         $source_name = isset($lang_names[$source_language]) ? $lang_names[$source_language] : $source_language;
+        $source_clause = $auto_source
+            ? "by automatically detecting each source language into {$target_name}"
+            : "from {$source_name} to {$target_name}";
 
-        if ($source_language === 'auto') {
-            return "You are a professional translator. Detect the source language automatically and translate the following {$count} numbered texts to {$target_name}. " .
-                   "Rules:\n" .
-                   "1. Return ONLY valid JSON.\n" .
-                   "2. The JSON must be an array with exactly {$count} strings in the same order as the input.\n" .
-                   "3. Do not wrap the JSON in markdown code fences.\n" .
-                   "4. Preserve HTML tags, placeholders, and special characters.\n" .
-                   "5. Keep the same tone and style.\n" .
-                   "6. Do not add any explanation or notes.\n" .
-                   "7. If a text is already in {$target_name}, return it unchanged.\n" .
-                   "8. If a text contains technical terms, brand names, model names, or product names, keep those parts as-is when appropriate.\n\n" .
-                   "Example output format:\n" .
-                   "[\"Translation 1\", \"Translation 2\"]\n\n" .
-                   "Texts to translate:\n{$combined_text}";
-        }
-
-        return "You are a professional translator. Translate the following {$count} numbered texts from {$source_name} to {$target_name}. " .
+        return "You are a professional translator. Translate the following {$count} numbered texts {$source_clause}. " .
                "Rules:\n" .
-               "1. Return ONLY valid JSON.\n" .
-               "2. The JSON must be an array with exactly {$count} strings in the same order as the input.\n" .
-               "3. Do not wrap the JSON in markdown code fences.\n" .
-               "4. Preserve HTML tags, placeholders, and special characters.\n" .
-               "5. Keep the same tone and style.\n" .
-               "6. Do not add any explanation or notes.\n" .
-               "7. If the text contains technical terms or brand names, keep them as-is.\n\n" .
-               "Example output format:\n" .
-               "[\"Translation 1\", \"Translation 2\"]\n\n" .
+               "1. Return ONLY the translated texts, each on a new line, keeping the same numbering format (1. xxx\\n2. xxx).\n" .
+               "2. Preserve HTML tags, placeholders, and special characters.\n" .
+               "3. Keep the same tone and style.\n" .
+               "4. Do not add any explanation or notes.\n" .
+               "5. If the text contains technical terms or brand names, keep them as-is.\n\n" .
                "Texts to translate:\n{$combined_text}";
     }
 
@@ -501,32 +499,40 @@ class Fanyi2_AI_Engine {
      * 解析批量翻译结果
      */
     private static function parse_batch_result($result, $original_texts) {
-        $result = trim((string) $result);
         $translations = array();
         $keys = array_keys($original_texts);
-
-        if ($result === '' || empty($keys)) {
+        if (empty($keys)) {
             return $translations;
         }
 
-        $json_payload = self::extract_batch_json_payload($result);
-        if ($json_payload !== null) {
-            $decoded = json_decode($json_payload, true);
-            if (is_array($decoded)) {
-                if (array_values($decoded) === $decoded) {
-                    foreach ($keys as $index => $key) {
-                        if (isset($decoded[$index])) {
-                            $translations[$key] = trim((string) $decoded[$index]);
-                        }
-                    }
-                } else {
-                    foreach ($keys as $index => $key) {
-                        $lookup_key = (string) ($index + 1);
-                        if (isset($decoded[$lookup_key])) {
-                            $translations[$key] = trim((string) $decoded[$lookup_key]);
-                        }
-                    }
+        $result = preg_replace("/\r\n?/", "\n", (string) $result);
+        $result = trim((string) $result);
+        if ($result === '') {
+            return $translations;
+        }
+
+        // 优先按编号块解析，支持多行译文，避免行错位导致串翻
+        $matches = array();
+        preg_match_all('/^\s*(\d+)[\.\)]\s*(.*?)\s*(?=^\s*\d+[\.\)]\s*|\z)/msu', $result, $matches, PREG_SET_ORDER);
+        if (!empty($matches)) {
+            foreach ($matches as $match) {
+                $number = isset($match[1]) ? intval($match[1]) : 0;
+                if ($number < 1 || $number > count($keys)) {
+                    continue;
                 }
+
+                $text = self::cleanup_batch_line(isset($match[2]) ? $match[2] : '');
+                if ($text === '') {
+                    continue;
+                }
+
+                $key = $keys[$number - 1];
+                $original = isset($original_texts[$key]) ? (string) $original_texts[$key] : '';
+                if (self::is_suspect_batch_translation($original, $text)) {
+                    continue;
+                }
+
+                $translations[$key] = $text;
             }
 
             if (!empty($translations)) {
@@ -534,75 +540,110 @@ class Fanyi2_AI_Engine {
             }
         }
 
-        $lines = preg_split('/\r\n|\r|\n/', $result);
-        $current_index = null;
-        $buffers = array();
+        // 兼容兜底：逐行按顺序解析
+        $lines = explode("\n", $result);
+        $index = 0;
+        foreach ($lines as $line) {
+            if ($index >= count($keys)) {
+                break;
+            }
 
-        foreach ((array) $lines as $line) {
-            $line = rtrim((string) $line);
+            $line = self::cleanup_batch_line($line);
             if ($line === '') {
                 continue;
             }
 
-            if (preg_match('/^(\d+)\.\s*(.*)$/', trim($line), $matches)) {
-                $item_index = intval($matches[1]) - 1;
-                if ($item_index < 0 || !isset($keys[$item_index])) {
-                    continue;
-                }
-
-                $current_index = $item_index;
-                $buffers[$item_index] = trim((string) $matches[2]);
+            $key = $keys[$index];
+            $original = isset($original_texts[$key]) ? (string) $original_texts[$key] : '';
+            if (self::is_suspect_batch_translation($original, $line)) {
+                $index++;
                 continue;
             }
 
-            if ($current_index !== null) {
-                $buffers[$current_index] = trim($buffers[$current_index] . "\n" . trim($line));
-            }
-        }
-
-        foreach ($buffers as $index => $text) {
-            if (isset($keys[$index]) && $text !== '') {
-                $translations[$keys[$index]] = $text;
-            }
-        }
-
-        if (!empty($translations)) {
-            return $translations;
-        }
-
-        if (count($keys) === 1) {
-            $translations[$keys[0]] = preg_replace('/^\d+\.\s*/', '', $result);
+            $translations[$key] = $line;
+            $index++;
         }
 
         return $translations;
     }
 
     /**
-     * 从批量返回中提取 JSON 片段
+     * 清理批量翻译行文本
      */
-    private static function extract_batch_json_payload($result) {
-        $result = trim((string) $result);
-        if ($result === '') {
-            return null;
+    private static function cleanup_batch_line($line) {
+        $line = trim((string) $line);
+        if ($line === '') {
+            return '';
         }
 
-        if (preg_match('/```(?:json)?\s*(\[.*\]|\{.*\})\s*```/su', $result, $matches)) {
-            return trim($matches[1]);
+        $line = preg_replace('/^\s*\d+[\.|\)]\s*/u', '', $line);
+        $line = trim((string) $line);
+        if ($line === '') {
+            return '';
         }
 
-        $first_square = strpos($result, '[');
-        $last_square = strrpos($result, ']');
-        if ($first_square !== false && $last_square !== false && $last_square > $first_square) {
-            return trim(substr($result, $first_square, $last_square - $first_square + 1));
+        // 去除常见代码块包裹
+        $line = preg_replace('/^`{1,3}(.*?)`{1,3}$/su', '$1', $line);
+
+        return trim((string) $line);
+    }
+
+    /**
+     * 判断批量译文是否明显异常（避免 CSS/JS 污染串到普通文本）
+     */
+    private static function is_suspect_batch_translation($original, $translated) {
+        $original = trim((string) $original);
+        $translated = trim((string) $translated);
+        if ($original === '' || $translated === '' || $original === $translated) {
+            return false;
         }
 
-        $first_brace = strpos($result, '{');
-        $last_brace = strrpos($result, '}');
-        if ($first_brace !== false && $last_brace !== false && $last_brace > $first_brace) {
-            return trim(substr($result, $first_brace, $last_brace - $first_brace + 1));
+        if (!self::looks_like_css_or_js($translated)) {
+            return false;
         }
 
-        return null;
+        return !self::looks_like_css_or_js($original);
+    }
+
+    /**
+     * 是否看起来像 CSS/JS 代码片段
+     */
+    private static function looks_like_css_or_js($text) {
+        $text = trim((string) $text);
+        if ($text === '') {
+            return false;
+        }
+
+        if (preg_match('/<\/?\s*(script|style|noscript)\b/i', $text)) {
+            return true;
+        }
+
+        if (preg_match('/@media\s+[^{]+\{/i', $text)) {
+            return true;
+        }
+
+        if (preg_match('/(?:admin-bar-inline-css|wpadminbar|sourceURL=)/i', $text)) {
+            return true;
+        }
+
+        if (preg_match('/\b(?:margin|padding|display|position|background|font-size|line-height|z-index)\s*:\s*[^;{}]+;/i', $text)
+            && (strpos($text, '{') !== false || strpos($text, '}') !== false)) {
+            return true;
+        }
+
+        $length = mb_strlen($text);
+        if ($length > 0) {
+            $code_chars = preg_match_all('/[{};<>=$#]/u', $text, $tmp);
+            if ($code_chars > 0 && ($code_chars / $length) > 0.08 && preg_match('/[:;{}]/', $text)) {
+                return true;
+            }
+        }
+
+        if (preg_match('/\b(?:function\s*\(|const\s+|let\s+|var\s+|document\.|window\.)/i', $text)) {
+            return true;
+        }
+
+        return false;
     }
 
     /**

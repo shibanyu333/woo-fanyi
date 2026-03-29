@@ -28,24 +28,23 @@
                 $(this).closest('.fanyi2-switcher').toggleClass('open');
             });
 
+            // 下拉/国旗样式：点击前记录手动语言偏好
             $(document).on('click', '.fanyi2-lang-option, .fanyi2-flag-option', function() {
-                var lang = $(this).data('lang') || $(this).data('fanyi2-lang');
+                var lang = $(this).data('fanyi2-lang') || $(this).data('lang');
                 if (lang) {
-                    Fanyi2Frontend.persistManualLanguage(lang);
+                    Fanyi2Frontend.setLanguagePreference(String(lang));
                 }
             });
 
+            // minimal 样式：切换后先写入偏好，再跳转
             $(document).on('change', '.fanyi2-switcher-select', function() {
-                var $selected = $(this).find('option:selected');
-                var lang = $selected.data('lang');
-                var url = $selected.val();
-
+                var targetUrl = $(this).val();
+                var lang = $(this).find('option:selected').data('lang');
                 if (lang) {
-                    Fanyi2Frontend.persistManualLanguage(lang);
+                    Fanyi2Frontend.setLanguagePreference(String(lang));
                 }
-
-                if (url) {
-                    window.location.href = url;
+                if (targetUrl) {
+                    window.location.href = targetUrl;
                 }
             });
 
@@ -53,6 +52,16 @@
             $(document).on('click', function() {
                 $('.fanyi2-switcher').removeClass('open');
             });
+        },
+
+        /**
+         * 记录用户手动选择的语言偏好
+         */
+        setLanguagePreference: function(lang) {
+            var maxAge = 365 * 24 * 60 * 60;
+            document.cookie = 'fanyi2_language=' + encodeURIComponent(lang) + '; path=/; max-age=' + maxAge;
+            document.cookie = 'fanyi2_user_selected=1; path=/; max-age=' + maxAge;
+            document.cookie = 'fanyi2_manual_lang=' + encodeURIComponent(lang) + '; path=/; max-age=' + maxAge;
         },
 
         initLanguageSwitcher: function() {
@@ -67,7 +76,6 @@
          * 内置切换器已使用真实 URL，此方法仅作为公开 API 保留
          */
         switchLanguage: function(lang) {
-            Fanyi2Frontend.persistManualLanguage(lang);
             Fanyi2Frontend.redirectToLanguage(lang);
         },
 
@@ -121,27 +129,6 @@
             }
 
             window.location.href = url.toString();
-        },
-
-        persistManualLanguage: function(lang) {
-            var maxAge = 365 * 24 * 60 * 60;
-            var path = '/';
-
-            if (typeof fanyi2_vars !== 'undefined' && fanyi2_vars.cookie_path) {
-                path = fanyi2_vars.cookie_path;
-            }
-
-            if (!path) {
-                path = '/';
-            }
-
-            path = path.replace(/\/+$/, '') || '/';
-            if (path !== '/') {
-                path += '/';
-            }
-
-            document.cookie = 'fanyi2_language=' + encodeURIComponent(lang) + '; path=' + path + '; max-age=' + maxAge + '; SameSite=Lax';
-            document.cookie = 'fanyi2_language_source=manual; path=' + path + '; max-age=' + maxAge + '; SameSite=Lax';
         }
     };
 
