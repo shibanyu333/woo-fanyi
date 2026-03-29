@@ -542,6 +542,29 @@ class Fanyi2_Database {
     }
 
     /**
+     * 按目标语言删除所有翻译（含等价语言）
+     */
+    public static function delete_translations_by_language($language) {
+        global $wpdb;
+
+        $canonical_language = self::resolve_translation_language($language);
+        $equivalent_languages = self::get_equivalent_translation_languages($canonical_language);
+        if (empty($equivalent_languages)) {
+            return 0;
+        }
+
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $sql = $wpdb->prepare(
+            "DELETE FROM $table_trans WHERE language IN ($placeholders)",
+            $equivalent_languages
+        );
+        $deleted = $wpdb->query($sql);
+
+        return is_numeric($deleted) ? intval($deleted) : 0;
+    }
+
+    /**
      * 获取统计信息
      */
     public static function get_stats() {

@@ -50,6 +50,17 @@ class Fanyi2_Ajax {
         add_action('wp_ajax_fanyi2_save_settings', array(__CLASS__, 'save_settings'));
         add_action('wp_ajax_fanyi2_set_force_default_output', array(__CLASS__, 'set_force_default_output'));
         add_action('wp_ajax_fanyi2_apply_default_language_cleanup', array(__CLASS__, 'apply_default_language_cleanup'));
+
+        // 目标语言整批清空翻译
+        add_action('wp_ajax_fanyi2_clear_language_translations', array(__CLASS__, 'clear_language_translations'));
+
+        // 后台持续翻译（可关闭页面）
+        add_action('wp_ajax_fanyi2_start_background_translation', array(__CLASS__, 'start_background_translation'));
+        add_action('wp_ajax_fanyi2_stop_background_translation', array(__CLASS__, 'stop_background_translation'));
+        add_action('wp_ajax_fanyi2_get_background_translation_status', array(__CLASS__, 'get_background_translation_status'));
+        add_action('wp_ajax_fanyi2_background_translation_worker', array(__CLASS__, 'background_translation_worker'));
+        add_action('wp_ajax_nopriv_fanyi2_background_translation_worker', array(__CLASS__, 'background_translation_worker'));
+        add_action('fanyi2_background_translation_tick', array(__CLASS__, 'background_translation_tick'));
     }
 
     /**
@@ -139,15 +150,15 @@ class Fanyi2_Ajax {
     private static function get_ai_chunk_size($batch_size) {
         $batch_size = intval($batch_size);
         if ($batch_size >= 300) {
-            return 80;
+            return 40;
         }
         if ($batch_size >= 150) {
-            return 70;
+            return 30;
         }
         if ($batch_size >= 80) {
-            return 60;
+            return 25;
         }
-        return max(20, min(60, $batch_size));
+        return max(10, min(25, $batch_size));
     }
 
     /**
@@ -156,12 +167,15 @@ class Fanyi2_Ajax {
     private static function get_parallel_concurrency($batch_size) {
         $batch_size = intval($batch_size);
         if ($batch_size >= 300) {
-            return 16;
+            return 6;
         }
         if ($batch_size >= 150) {
-            return 12;
+            return 5;
         }
-        return 8;
+        if ($batch_size >= 80) {
+            return 4;
+        }
+        return 3;
     }
 
     /**
@@ -530,12 +544,55 @@ class Fanyi2_Ajax {
 
         $page_url = isset($_POST['page_url']) ? sanitize_url($_POST['page_url']) : '';
         $language = isset($_POST['language']) ? sanitize_text_field($_POST['language']) : '';
+        $originals_raw = isset($_POST['originals']) ? $_POST['originals'] : array();
+        $originals = array();
 
-        if (empty($page_url) || empty($language)) {
+        if (is_array($originals_raw)) {
+            foreach ($originals_raw as $item) {
+                $text = trim(wp_strip_all_tags(wp_unslash($item)));
+                if ($text === '' || mb_strlen($text) < 2) {
+                    continue;
+                }
+                $originals[] = $text;
+            }
+            $originals = array_values(array_unique($originals));
+        }
+
+        if (empty($language)) {
             wp_send_json_error(array('message' => '参数不完整'));
         }
 
-        $translations = Fanyi2_Database::get_page_translations($page_url, $language);
+        // 优先按页面当前文本列表查询：不依赖 page_url，可命中来自其它页面/扫描来源的已存在翻译
+        if (!empty($originals)) {
+            $map = Fanyi2_Database::get_translations_batch($originals, $language);
+            $missing = array_diff($originals, array_keys($map));
+
+            // 对少量未命中的文本使用规范化记忆兜底（处理空白差异等情况）
+            if (!empty($missing) && count($missing) <= 200) {
+                $memory_map = Fanyi2_Database::get_translation_memory_map($language);
+                foreach ($missing as $original) {
+                    $normalized = Fanyi2_Database::normalize_string($original);
+                    if ($normalized !== '' && isset($memory_map[$normalized]) && $memory_map[$normalized] !== '') {
+                        $map[$original] = $memory_map[$normalized];
+                    }
+                }
+            }
+
+            $translations = array();
+            foreach ($map as $original => $translated) {
+                $translations[] = (object) array(
+                    'original_string'   => $original,
+                    'string_hash'       => md5($original),
+                    'selector'          => '',
+                    'translated_string' => $translated,
+                );
+            }
+        } else {
+            if (empty($page_url)) {
+                wp_send_json_error(array('message' => '参数不完整'));
+            }
+            $translations = Fanyi2_Database::get_page_translations($page_url, $language);
+        }
 
         wp_send_json_success(array(
             'translations' => $translations,
@@ -615,6 +672,7 @@ class Fanyi2_Ajax {
         $saved_from_memory = 0;
         $saved_from_ai = 0;
         $warnings = array();
+        $had_timeout_error = false;
         $round_count = 0;
 
         for ($round = 0; $round < $rounds_per_request; $round++) {
@@ -702,7 +760,11 @@ class Fanyi2_Ajax {
                     $fallback_items = array(); // 收集需要单条补译的项
                     foreach ($parallel_results as $cidx => $presult) {
                         if (!empty($presult['error'])) {
-                            $warnings[] = '并行批次失败：' . $presult['error']->get_error_message();
+                            $error_message = $presult['error']->get_error_message();
+                            $warnings[] = '并行批次失败：' . $error_message;
+                            if (stripos($error_message, 'cURL error 28') !== false || stripos($error_message, 'timed out') !== false) {
+                                $had_timeout_error = true;
+                            }
                             // 整个 chunk 失败 → 加入兜底队列
                             if (isset($budget_chunks[$cidx])) {
                                 foreach ($budget_chunks[$cidx] as $sid => $txt) {
@@ -744,9 +806,67 @@ class Fanyi2_Ajax {
                         }
                     }
 
-                    // 单条兜底补译（最多 5 条，避免长时间卡住）
+                    // 先尝试小批次重试（降低超时概率）
                     if (!empty($fallback_items)) {
-                        $max_fallback = 5;
+                        $retry_chunk_size = max(6, min(15, intval(floor($ai_chunk_size / 2))));
+                        $retry_budget = min(count($fallback_items), max(30, $batch_size));
+                        $retried = 0;
+                        $retry_chunks = array_chunk($fallback_items, $retry_chunk_size, true);
+
+                        foreach ($retry_chunks as $retry_chunk) {
+                            if ((microtime(true) - $request_started_at) >= $max_request_seconds) {
+                                break;
+                            }
+                            if ($retried >= $retry_budget) {
+                                break;
+                            }
+
+                            $retry_keys = array_keys($retry_chunk);
+                            if (($retried + count($retry_keys)) > $retry_budget) {
+                                $retry_keys = array_slice($retry_keys, 0, $retry_budget - $retried);
+                                $retry_chunk = array_intersect_key($retry_chunk, array_flip($retry_keys));
+                            }
+                            $retried += count($retry_chunk);
+
+                            $retry_result = Fanyi2_AI_Engine::translate_batch($retry_chunk, $language, $source_language);
+                            if (is_wp_error($retry_result) || !is_array($retry_result)) {
+                                if (is_wp_error($retry_result)) {
+                                    $retry_msg = $retry_result->get_error_message();
+                                    if (stripos($retry_msg, 'cURL error 28') !== false || stripos($retry_msg, 'timed out') !== false) {
+                                        $had_timeout_error = true;
+                                    }
+                                }
+                                continue;
+                            }
+
+                            foreach ($retry_result as $sid => $translated) {
+                                $translated = trim((string) $translated);
+                                if ($translated === '' || !isset($fallback_items[$sid])) {
+                                    continue;
+                                }
+                                if (self::should_reject_ai_translation($fallback_items[$sid], $translated)) {
+                                    $warnings[] = sprintf('已跳过疑似异常重试译文（ID %d）', intval($sid));
+                                    unset($fallback_items[$sid]);
+                                    continue;
+                                }
+                                $saved_id = Fanyi2_Database::save_translation_if_missing($sid, $language, $translated, 'ai');
+                                if ($saved_id) {
+                                    $saved_from_ai++;
+                                    $translated_in_round++;
+                                }
+                                $round_translated_texts[(int) $sid] = $translated;
+                                $normalized_original = Fanyi2_Database::normalize_string($fallback_items[$sid]);
+                                if ($normalized_original !== '') {
+                                    $memory_map[$normalized_original] = $translated;
+                                }
+                                unset($fallback_items[$sid]);
+                            }
+                        }
+                    }
+
+                    // 单条兜底补译（动态放宽，避免大量缺失）
+                    if (!empty($fallback_items)) {
+                        $max_fallback = min(60, max(10, intval(floor($batch_size / 2))));
                         $fallback_count = 0;
                         $warnings[] = sprintf('有 %d 条批量未返回，单条补译前 %d 条', count($fallback_items), min(count($fallback_items), $max_fallback));
                         foreach ($fallback_items as $sid => $txt) {
@@ -754,7 +874,13 @@ class Fanyi2_Ajax {
                             if ((microtime(true) - $request_started_at) >= $max_request_seconds) break;
                             $fallback_count++;
                             $single = Fanyi2_AI_Engine::translate($txt, $language, $source_language);
-                            if (is_wp_error($single)) continue;
+                            if (is_wp_error($single)) {
+                                $single_msg = $single->get_error_message();
+                                if (stripos($single_msg, 'cURL error 28') !== false || stripos($single_msg, 'timed out') !== false) {
+                                    $had_timeout_error = true;
+                                }
+                                continue;
+                            }
                             $single = trim((string) $single);
                             if ($single === '') continue;
                             if (self::should_reject_ai_translation($txt, $single)) {
@@ -813,7 +939,12 @@ class Fanyi2_Ajax {
         } elseif ($saved > 0) {
             $status = 'running';
         } else {
-            $status = !empty($warnings) ? 'error' : 'stalled';
+            if ($had_timeout_error) {
+                $status = 'running';
+                $warnings[] = '检测到网络超时，已自动降载并将在下一轮继续重试';
+            } else {
+                $status = !empty($warnings) ? 'error' : 'stalled';
+            }
             if (empty($warnings)) {
                 $warnings[] = '本轮未产生新译文，可能是模型返回格式异常或该批次文本需重试';
             }
@@ -1059,6 +1190,551 @@ class Fanyi2_Ajax {
         // 清除所有语言的缓存
         Fanyi2_Translator::clear_translation_cache();
         wp_send_json_success(array('message' => '已清除所有翻译'));
+    }
+
+    /**
+     * 清空指定目标语言的全部翻译
+     */
+    public static function clear_language_translations() {
+        self::verify_admin();
+
+        $language = isset($_POST['language']) ? sanitize_text_field($_POST['language']) : '';
+        if (empty($language)) {
+            wp_send_json_error(array('message' => '请选择目标语言'));
+        }
+
+        $deleted = Fanyi2_Database::delete_translations_by_language($language);
+        Fanyi2_Translator::clear_translation_cache($language);
+        self::remove_pretranslate_progress_for_language($language);
+
+        $job = self::get_background_job_state();
+        $canonical_job_lang = Fanyi2_Database::resolve_translation_language(isset($job['language']) ? $job['language'] : '');
+        $canonical_req_lang = Fanyi2_Database::resolve_translation_language($language);
+        if (!empty($job['running']) && $canonical_job_lang === $canonical_req_lang) {
+            $job['running'] = 0;
+            $job['status'] = 'stopped';
+            $job['updated_at'] = current_time('mysql');
+            $job['stopped_at'] = current_time('mysql');
+            $job['last_message'] = '目标语言已清空，后台任务自动停止';
+            self::save_background_job_state($job);
+            self::clear_background_tick_events();
+        }
+
+        wp_send_json_success(array(
+            'deleted' => $deleted,
+            'message' => sprintf('已清空该语言翻译，共删除 %d 条', $deleted),
+        ));
+    }
+
+    /**
+     * 启动后台持续翻译（可关闭页面）
+     */
+    public static function start_background_translation() {
+        self::verify_admin();
+
+        if (function_exists('ignore_user_abort')) {
+            ignore_user_abort(true);
+        }
+        if (function_exists('set_time_limit')) {
+            set_time_limit(120);
+        }
+
+        $language = isset($_POST['language']) ? sanitize_text_field($_POST['language']) : '';
+        $scope = self::normalize_translation_scope(isset($_POST['scope']) ? sanitize_text_field($_POST['scope']) : 'all');
+        $batch_size = self::normalize_batch_size(isset($_POST['batch_size']) ? $_POST['batch_size'] : get_option('fanyi2_batch_size', 120));
+        $force_default_mode = !empty($_POST['force_default_mode']) && sanitize_text_field($_POST['force_default_mode']) === '1';
+
+        if (empty($language)) {
+            wp_send_json_error(array('message' => '请选择目标语言'));
+        }
+
+        $default_language = get_option('fanyi2_default_language', 'zh');
+        $canonical_default = Fanyi2_Database::resolve_translation_language($default_language);
+        $canonical_language = Fanyi2_Database::resolve_translation_language($language);
+        if ($force_default_mode && $canonical_language !== $canonical_default) {
+            wp_send_json_error(array('message' => '默认语言清洗模式仅允许翻译到默认语言'));
+        }
+
+        $enabled_languages = get_option('fanyi2_enabled_languages', array());
+        if (!in_array($language, $enabled_languages, true) && !in_array($canonical_language, $enabled_languages, true)) {
+            wp_send_json_error(array('message' => '不支持的目标语言'));
+        }
+
+        $job = self::get_background_job_state();
+        $token = wp_generate_password(32, false, false);
+        $job['running'] = 1;
+        $job['status'] = 'running';
+        $job['language'] = $canonical_language;
+        $job['scope'] = $scope;
+        $job['batch_size'] = $batch_size;
+        $job['force_default_mode'] = $force_default_mode ? 1 : 0;
+        $job['token'] = $token;
+        $job['started_at'] = current_time('mysql');
+        $job['updated_at'] = current_time('mysql');
+        $job['stopped_at'] = '';
+        $job['last_message'] = '后台翻译任务已启动';
+        $job['last_batch_translated'] = 0;
+        $job['last_batch_translated_by_memory'] = 0;
+        $job['last_batch_translated_by_ai'] = 0;
+        $job['translated_total'] = 0;
+        $job['total_strings'] = 0;
+        $job['remaining'] = 0;
+
+        self::save_background_job_state($job);
+        self::clear_background_tick_events();
+
+        // 立即执行一轮，确保“点击开始后马上关页面”也能推进任务
+        $immediate = self::run_background_worker_once(false, $token);
+        $job = self::get_background_job_state();
+
+        if (!$immediate['success']) {
+            $job['running'] = 0;
+            $job['status'] = 'error';
+            $job['updated_at'] = current_time('mysql');
+            $job['last_message'] = isset($immediate['data']['message']) ? $immediate['data']['message'] : '后台任务启动失败';
+            self::save_background_job_state($job);
+            wp_send_json_error(array(
+                'job' => $job,
+                'message' => $job['last_message'],
+            ));
+        }
+
+        // 兜底：即使 loopback 链路不稳定，也保留 cron tick 继续推进
+        self::schedule_background_tick(5);
+
+        wp_send_json_success(array(
+            'job' => $job,
+            'message' => '后台持续翻译已启动，可关闭当前页面',
+            'immediate' => $immediate['data'],
+        ));
+    }
+
+    /**
+     * 停止后台持续翻译
+     */
+    public static function stop_background_translation() {
+        self::verify_admin();
+
+        $job = self::get_background_job_state();
+        $job['running'] = 0;
+        $job['status'] = 'stopped';
+        $job['updated_at'] = current_time('mysql');
+        $job['stopped_at'] = current_time('mysql');
+        $job['last_message'] = '后台翻译任务已停止';
+        self::save_background_job_state($job);
+        self::clear_background_tick_events();
+
+        wp_send_json_success(array(
+            'job' => $job,
+            'message' => '已停止后台持续翻译',
+        ));
+    }
+
+    /**
+     * 获取后台持续翻译状态
+     */
+    public static function get_background_translation_status() {
+        self::verify_admin();
+
+        $job = self::get_background_job_state();
+        $progress = null;
+        if (!empty($job['language'])) {
+            $all_progress = get_option('fanyi2_pretranslate_progress', array());
+            if (!is_array($all_progress)) {
+                $all_progress = array();
+            }
+            $progress_key = self::build_pretranslate_progress_key($job['language'], isset($job['scope']) ? $job['scope'] : 'all');
+            if (isset($all_progress[$progress_key])) {
+                $progress = $all_progress[$progress_key];
+            } elseif (isset($all_progress[$job['language']])) {
+                $progress = $all_progress[$job['language']];
+            }
+        }
+
+        wp_send_json_success(array(
+            'job' => $job,
+            'progress' => $progress,
+        ));
+    }
+
+    /**
+     * 后台 worker（loopback 触发）
+     */
+    public static function background_translation_worker() {
+        $token = isset($_POST['token']) ? sanitize_text_field($_POST['token']) : '';
+        $result = self::run_background_worker_once(false, $token);
+        if ($result['success']) {
+            wp_send_json_success($result['data']);
+        }
+        wp_send_json_error($result['data']);
+    }
+
+    /**
+     * 后台 worker（Cron 兜底触发）
+     */
+    public static function background_translation_tick() {
+        self::run_background_worker_once(true, '');
+    }
+
+    /**
+     * 供停用钩子调用：清理后台任务调度
+     */
+    public static function clear_background_translation_jobs() {
+        self::clear_background_tick_events();
+    }
+
+    /**
+     * 执行一次后台翻译 worker
+     */
+    private static function run_background_worker_once($from_cron = false, $token = '') {
+        $job = self::get_background_job_state();
+        if (empty($job['running'])) {
+            return array('success' => true, 'data' => array('status' => 'stopped'));
+        }
+
+        $job_token = isset($job['token']) ? (string) $job['token'] : '';
+        if (!$from_cron) {
+            if ($token === '' || $job_token === '' || !hash_equals($job_token, $token)) {
+                return array('success' => true, 'data' => array('status' => 'ignored', 'message' => '无效 worker token'));
+            }
+        }
+
+        if (get_transient('fanyi2_background_worker_lock')) {
+            if ($from_cron) {
+                self::schedule_background_tick(10);
+            }
+            return array('success' => true, 'data' => array('status' => 'locked'));
+        }
+
+        set_transient('fanyi2_background_worker_lock', 1, 55);
+
+        $result = self::process_background_translation_chunk(
+            isset($job['language']) ? $job['language'] : '',
+            isset($job['scope']) ? $job['scope'] : 'all',
+            isset($job['batch_size']) ? intval($job['batch_size']) : intval(get_option('fanyi2_batch_size', 120)),
+            !empty($job['force_default_mode'])
+        );
+
+        delete_transient('fanyi2_background_worker_lock');
+
+        // 若用户在执行期间停止/替换了任务，尊重最新状态
+        $latest = self::get_background_job_state();
+        if ((string) ($latest['token'] ?? '') !== $job_token) {
+            return array('success' => true, 'data' => array('status' => 'replaced'));
+        }
+        if (empty($latest['running'])) {
+            return array('success' => true, 'data' => array('status' => 'stopped'));
+        }
+
+        if (!$result['success']) {
+            $latest['running'] = 0;
+            $latest['status'] = 'error';
+            $latest['updated_at'] = current_time('mysql');
+            $latest['last_message'] = isset($result['data']['message']) ? $result['data']['message'] : '后台翻译失败';
+            self::save_background_job_state($latest);
+            self::clear_background_tick_events();
+            return $result;
+        }
+
+        $data = $result['data'];
+        $latest['status'] = isset($data['status']) ? $data['status'] : 'running';
+        $latest['updated_at'] = current_time('mysql');
+        $latest['last_message'] = isset($data['message']) ? $data['message'] : '';
+        $latest['last_batch_translated'] = isset($data['last_batch_translated']) ? intval($data['last_batch_translated']) : 0;
+        $latest['last_batch_translated_by_memory'] = isset($data['last_batch_translated_by_memory']) ? intval($data['last_batch_translated_by_memory']) : 0;
+        $latest['last_batch_translated_by_ai'] = isset($data['last_batch_translated_by_ai']) ? intval($data['last_batch_translated_by_ai']) : 0;
+        $latest['translated_total'] = isset($data['translated_total']) ? intval($data['translated_total']) : intval($latest['translated_total'] ?? 0);
+        $latest['total_strings'] = isset($data['total_strings']) ? intval($data['total_strings']) : intval($latest['total_strings'] ?? 0);
+        $latest['remaining'] = isset($data['remaining']) ? intval($data['remaining']) : intval($latest['remaining'] ?? 0);
+
+        if ($latest['status'] === 'completed' || intval($latest['remaining']) <= 0) {
+            $latest['running'] = 0;
+            $latest['status'] = 'completed';
+            $latest['stopped_at'] = current_time('mysql');
+            self::save_background_job_state($latest);
+            self::clear_background_tick_events();
+            return $result;
+        }
+
+        self::save_background_job_state($latest);
+        $dispatch = self::dispatch_background_worker($job_token);
+        if (is_wp_error($dispatch)) {
+            self::schedule_background_tick(5);
+        }
+
+        return $result;
+    }
+
+    /**
+     * 执行一轮后台翻译（简化高稳定模式）
+     */
+    private static function process_background_translation_chunk($language, $scope = 'all', $batch_size = 120, $force_default_mode = false) {
+        $language = sanitize_text_field((string) $language);
+        $scope = self::normalize_translation_scope($scope);
+        $batch_size = self::normalize_batch_size($batch_size);
+        $canonical_language = Fanyi2_Database::resolve_translation_language($language);
+
+        if ($canonical_language === '') {
+            return array('success' => false, 'data' => array('message' => '后台任务语言为空'));
+        }
+
+        $default_language = get_option('fanyi2_default_language', 'zh');
+        $canonical_default = Fanyi2_Database::resolve_translation_language($default_language);
+        if ($force_default_mode && $canonical_language !== $canonical_default) {
+            return array('success' => false, 'data' => array('message' => '默认语言清洗模式仅允许翻译到默认语言'));
+        }
+
+        if (function_exists('set_time_limit')) {
+            set_time_limit(55);
+        }
+
+        $source_language = $force_default_mode ? 'auto' : $default_language;
+        $total_strings = Fanyi2_Database::count_active_strings($scope);
+        $query_limit = min(400, max(120, $batch_size * 2));
+        $untranslated = Fanyi2_Database::get_untranslated_strings($canonical_language, $query_limit, $scope);
+
+        $saved_from_memory = 0;
+        $saved_from_ai = 0;
+        $warnings = array();
+        $round_translated_texts = array();
+
+        if (!empty($untranslated)) {
+            $memory_map = Fanyi2_Database::get_translation_memory_map($canonical_language);
+            $texts_for_ai = array();
+            $duplicate_ids = array();
+            $normalized_seed_map = array();
+            $max_ai_items = min(220, max(30, $batch_size * 2));
+
+            foreach ($untranslated as $str) {
+                if (!isset($str->id) || !isset($str->original_string)) {
+                    continue;
+                }
+
+                $original = (string) $str->original_string;
+                $normalized = Fanyi2_Database::normalize_string($original);
+
+                if ($normalized !== '' && isset($memory_map[$normalized])) {
+                    $saved_id = Fanyi2_Database::save_translation_if_missing($str->id, $canonical_language, $memory_map[$normalized], 'memory');
+                    if ($saved_id) {
+                        $saved_from_memory++;
+                    }
+                    continue;
+                }
+
+                if ($force_default_mode && self::can_reuse_original_for_default($original, $canonical_language)) {
+                    $saved_id = Fanyi2_Database::save_translation_if_missing($str->id, $canonical_language, $original, 'memory');
+                    if ($saved_id) {
+                        $saved_from_memory++;
+                        if ($normalized !== '') {
+                            $memory_map[$normalized] = $original;
+                        }
+                    }
+                    continue;
+                }
+
+                if ($normalized !== '' && isset($normalized_seed_map[$normalized])) {
+                    $seed_id = $normalized_seed_map[$normalized];
+                    if (!isset($duplicate_ids[$seed_id])) {
+                        $duplicate_ids[$seed_id] = array();
+                    }
+                    $duplicate_ids[$seed_id][] = (int) $str->id;
+                    continue;
+                }
+
+                if (count($texts_for_ai) < $max_ai_items) {
+                    $texts_for_ai[$str->id] = $original;
+                    if ($normalized !== '') {
+                        $normalized_seed_map[$normalized] = (int) $str->id;
+                    }
+                }
+            }
+
+            if (!empty($texts_for_ai)) {
+                $translated_pack = self::translate_batch_with_fallback($texts_for_ai, $canonical_language, $source_language);
+                if (!empty($translated_pack['warnings']) && is_array($translated_pack['warnings'])) {
+                    $warnings = array_merge($warnings, $translated_pack['warnings']);
+                }
+
+                foreach ($translated_pack['translations'] as $string_id => $translated) {
+                    $translated = trim((string) $translated);
+                    if ($translated === '' || !isset($texts_for_ai[$string_id])) {
+                        continue;
+                    }
+                    if (self::should_reject_ai_translation($texts_for_ai[$string_id], $translated)) {
+                        $warnings[] = sprintf('已跳过疑似异常译文（ID %d）', intval($string_id));
+                        continue;
+                    }
+                    $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $canonical_language, $translated, 'ai');
+                    if ($saved_id) {
+                        $saved_from_ai++;
+                    }
+                    $round_translated_texts[(int) $string_id] = $translated;
+
+                    $normalized_original = Fanyi2_Database::normalize_string($texts_for_ai[$string_id]);
+                    if ($normalized_original !== '') {
+                        $memory_map[$normalized_original] = $translated;
+                    }
+                }
+            }
+
+            // 复用同轮重复文本
+            if (!empty($duplicate_ids) && !empty($round_translated_texts)) {
+                foreach ($duplicate_ids as $seed_id => $dup_list) {
+                    $seed_id = intval($seed_id);
+                    if (!isset($round_translated_texts[$seed_id])) {
+                        continue;
+                    }
+                    foreach ($dup_list as $dup_id) {
+                        $saved_id = Fanyi2_Database::save_translation_if_missing((int) $dup_id, $canonical_language, $round_translated_texts[$seed_id], 'memory');
+                        if ($saved_id) {
+                            $saved_from_memory++;
+                        }
+                    }
+                }
+            }
+        }
+
+        $saved = $saved_from_memory + $saved_from_ai;
+        Fanyi2_Translator::clear_translation_cache($canonical_language);
+
+        $remaining = Fanyi2_Database::count_untranslated_strings($canonical_language, $scope);
+        $translated_total = Fanyi2_Database::count_translated_strings($canonical_language, $scope);
+        $status = 'running';
+        if ($remaining <= 0) {
+            $status = 'completed';
+        } elseif ($saved <= 0) {
+            $warnings[] = '本轮未产生新译文，后台将继续自动重试';
+        }
+
+        $warnings = self::summarize_warnings($warnings, 20);
+        $response_data = array(
+            'status'                           => $status,
+            'scope'                            => $scope,
+            'force_default_mode'               => $force_default_mode ? 1 : 0,
+            'batch_size'                       => $batch_size,
+            'rounds_per_request'               => 1,
+            'rounds_executed'                  => 1,
+            'translated'                       => $saved,
+            'translated_by_memory'             => $saved_from_memory,
+            'translated_by_ai'                 => $saved_from_ai,
+            'translated_total'                 => $translated_total,
+            'total_strings'                    => $total_strings,
+            'remaining'                        => $remaining,
+            'last_batch_translated'            => $saved,
+            'last_batch_translated_by_memory'  => $saved_from_memory,
+            'last_batch_translated_by_ai'      => $saved_from_ai,
+            'warnings'                         => $warnings,
+        );
+
+        self::persist_pretranslate_progress($canonical_language, $response_data, $scope);
+
+        $message = sprintf('后台本轮处理 %d 条（复用 %d 条，AI翻译 %d 条）', $saved, $saved_from_memory, $saved_from_ai);
+        $response_data['message'] = $message;
+
+        return array('success' => true, 'data' => $response_data);
+    }
+
+    /**
+     * 后台任务调度：异步触发 worker
+     */
+    private static function dispatch_background_worker($token) {
+        $token = sanitize_text_field((string) $token);
+        if ($token === '') {
+            return new WP_Error('empty_token', '后台 worker token 为空');
+        }
+
+        return wp_remote_post(admin_url('admin-ajax.php'), array(
+            'timeout' => 0.01,
+            'blocking' => false,
+            'sslverify' => false,
+            'body' => array(
+                'action' => 'fanyi2_background_translation_worker',
+                'token' => $token,
+            ),
+        ));
+    }
+
+    /**
+     * Cron 兜底：在 loopback 失败时继续推进
+     */
+    private static function schedule_background_tick($delay_seconds = 5) {
+        $delay = max(1, intval($delay_seconds));
+        wp_schedule_single_event(time() + $delay, 'fanyi2_background_translation_tick');
+    }
+
+    /**
+     * 清理所有后台 tick 事件
+     */
+    private static function clear_background_tick_events() {
+        $timestamp = wp_next_scheduled('fanyi2_background_translation_tick');
+        while ($timestamp) {
+            wp_unschedule_event($timestamp, 'fanyi2_background_translation_tick');
+            $timestamp = wp_next_scheduled('fanyi2_background_translation_tick');
+        }
+    }
+
+    /**
+     * 删除某语言的历史进度快照（清空翻译时使用）
+     */
+    private static function remove_pretranslate_progress_for_language($language) {
+        $canonical_lang = Fanyi2_Database::resolve_translation_language($language);
+        $all_progress = get_option('fanyi2_pretranslate_progress', array());
+        if (!is_array($all_progress) || empty($all_progress)) {
+            return;
+        }
+
+        $new_progress = array();
+        foreach ($all_progress as $key => $value) {
+            $k = (string) $key;
+            if ($k === $canonical_lang || strpos($k, $canonical_lang . '::') === 0) {
+                continue;
+            }
+            $new_progress[$k] = $value;
+        }
+
+        update_option('fanyi2_pretranslate_progress', $new_progress, false);
+    }
+
+    /**
+     * 获取后台任务状态
+     */
+    private static function get_background_job_state() {
+        $job = get_option('fanyi2_background_translation_job', array());
+        $defaults = array(
+            'running' => 0,
+            'status' => 'idle',
+            'language' => '',
+            'scope' => 'all',
+            'batch_size' => intval(get_option('fanyi2_batch_size', 120)),
+            'force_default_mode' => 0,
+            'token' => '',
+            'started_at' => '',
+            'updated_at' => '',
+            'stopped_at' => '',
+            'last_message' => '',
+            'last_batch_translated' => 0,
+            'last_batch_translated_by_memory' => 0,
+            'last_batch_translated_by_ai' => 0,
+            'translated_total' => 0,
+            'total_strings' => 0,
+            'remaining' => 0,
+        );
+
+        if (!is_array($job)) {
+            $job = array();
+        }
+
+        return array_merge($defaults, $job);
+    }
+
+    /**
+     * 保存后台任务状态
+     */
+    private static function save_background_job_state($job) {
+        if (!is_array($job)) {
+            return;
+        }
+        update_option('fanyi2_background_translation_job', $job, false);
     }
 
     /**

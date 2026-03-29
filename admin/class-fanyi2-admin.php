@@ -106,6 +106,7 @@ class Fanyi2_Admin {
                 'enabled_languages' => get_option('fanyi2_enabled_languages', array()),
                 'ai_engine'         => get_option('fanyi2_ai_engine', 'deepseek'),
                 'auto_detect_browser' => get_option('fanyi2_auto_detect_browser', '1'),
+                'batch_size'        => intval(get_option('fanyi2_batch_size', 120)),
             ),
         ));
     }
@@ -453,10 +454,16 @@ class Fanyi2_Admin {
                         <p class="description" style="margin-top:6px;">可按范围单独翻译，进度也会按“语言+范围”分别保存。</p>
                     </div>
                     <button id="fanyi2-start-pretranslate" class="button button-primary button-hero">
-                        🚀 开始翻译
+                        🚀 开始翻译（后台持续）
+                    </button>
+                    <button id="fanyi2-stop-background-translation" class="button button-secondary button-hero">
+                        ⏹ 停止后台翻译
                     </button>
                     <button id="fanyi2-translate-all-langs" class="button button-secondary button-hero">
                         🌐 翻译所有语言
+                    </button>
+                    <button id="fanyi2-clear-target-lang-translations" class="button button-secondary button-hero">
+                        🗑 清空目标语言翻译
                     </button>
                     <button id="fanyi2-unify-default-language" class="button button-secondary button-hero">
                         🧹 清洗默认语言（<?php echo esc_html($default_lang_name); ?>，写入数据库）
@@ -470,6 +477,7 @@ class Fanyi2_Admin {
                         </div>
                         <p class="fanyi2-pretranslate-status">准备中...</p>
                     </div>
+                    <div id="fanyi2-background-status" style="margin-top:10px;color:#334155;font-size:13px;"></div>
                 </div>
             </div>
         </div>

@@ -5,10 +5,13 @@
     'use strict';
 
     var Fanyi2Admin = {
+        backgroundStatusTimer: null,
+
         init: function() {
             this.bindEvents();
             this.initTabs();
             this.loadPretranslateProgress();
+            this.loadBackgroundTranslationStatus();
         },
 
         bindEvents: function() {
@@ -40,6 +43,12 @@
             $('#fanyi2-start-pretranslate').on('click', function() {
                 Fanyi2Admin.startPretranslate();
             });
+            $('#fanyi2-stop-background-translation').on('click', function() {
+                Fanyi2Admin.stopBackgroundTranslation();
+            });
+            $('#fanyi2-clear-target-lang-translations').on('click', function() {
+                Fanyi2Admin.clearTargetLanguageTranslations();
+            });
 
             // 翻译所有语言
             $('#fanyi2-translate-all-langs').on('click', function() {
@@ -54,6 +63,7 @@
             // 切换目标语言/翻译范围时加载最近进度
             $('#fanyi2-batch-target-lang, #fanyi2-batch-scope').on('change', function() {
                 Fanyi2Admin.loadPretranslateProgress();
+                Fanyi2Admin.loadBackgroundTranslationStatus();
             });
 
             // 编辑翻译（保留旧选择器作为兼容）
@@ -261,21 +271,13 @@
          * 开始翻译
          */
         startPretranslate: function() {
-            var targetLang = $('#fanyi2-batch-target-lang').val();
-            var scope = this.getPretranslateScope();
-            var batchSize = 500;
-            var $btn = $('#fanyi2-start-pretranslate');
-
-            $btn.prop('disabled', true).text('翻译中...');
-            $('#fanyi2-pretranslate-progress').show();
-            
-            this.runPretranslateBatch(targetLang, scope, batchSize, 0, 0, {});
+            this.startBackgroundTranslation();
         },
 
         unifyToDefaultLanguage: function() {
             var defaultLang = fanyi2_admin.settings.default_language;
             var $btn = $('#fanyi2-unify-default-language');
-            var batchSize = 500;
+            var batchSize = this.getPreferredBatchSize();
 
             if (!defaultLang) {
                 this.showAdminNotice('error', '未检测到默认语言');
@@ -343,6 +345,12 @@
                 size = 500;
             }
             return Math.max(50, Math.min(500, size));
+        },
+
+        getPreferredBatchSize: function() {
+            var configured = (fanyi2_admin.settings && fanyi2_admin.settings.batch_size) ? fanyi2_admin.settings.batch_size : 120;
+            // 稳定优先：避免默认过大批次导致超时卡住
+            return Math.max(50, Math.min(180, this.normalizeBatchSize(configured)));
         },
 
         getPretranslateScope: function() {
@@ -433,11 +441,17 @@
                         var translatedTotal = parseInt(response.data.translated_total || totalTranslated, 10);
                         var totalStrings = parseInt(response.data.total_strings || (translatedTotal + remaining), 10);
                         var status = response.data.status || (remaining > 0 ? 'running' : 'completed');
+                        var warnings = (response.data.warnings && response.data.warnings.length) ? response.data.warnings : [];
+                        var hasTimeoutWarning = warnings.some(function(w) {
+                            var s = String(w || '').toLowerCase();
+                            return s.indexOf('timed out') !== -1 || s.indexOf('curl error 28') !== -1 || s.indexOf('网络超时') !== -1;
+                        });
+                        var nextBatchSize = hasTimeoutWarning ? Math.max(50, Math.floor(batchSize * 0.7)) : batchSize;
 
                         if (status === 'running' && remaining > 0) {
                             var translatedThisRound = parseInt(response.data.translated || 0, 10);
                             if (translatedThisRound <= 0) {
-                                var nextBatchOnRunning = Math.max(10, Math.floor(batchSize / 2));
+                                var nextBatchOnRunning = Math.max(50, Math.floor(batchSize / 2));
                                 if (stalledRetries < 3 && nextBatchOnRunning < batchSize) {
                                     var percentRunningRetry = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
                                     $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentRunningRetry + '%');
@@ -455,11 +469,11 @@
                             
                             // 继续下一批（无需等待，立即发起下一轮）
                             setTimeout(function() {
-                                self.runPretranslateBatch(targetLang, scope, batchSize, totalTranslated, 0, opts);
+                                self.runPretranslateBatch(targetLang, scope, nextBatchSize, totalTranslated, 0, opts);
                             }, 10);
                         } else if (status === 'completed' || remaining <= 0) {
                             // 翻译完成
-                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译（后台持续）');
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', '100%');
                             $('.fanyi2-pretranslate-status').text('✅ 翻译完成！共翻译 ' + translatedTotal + ' / ' + totalStrings + ' 条');
                             Fanyi2Admin.showAdminNotice('success', '翻译完成！共翻译 ' + translatedTotal + ' 条');
@@ -467,7 +481,7 @@
                                 opts.onDone('completed', response.data);
                             }
                         } else if (status === 'error') {
-                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译（后台持续）');
                             var percentError = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentError + '%');
                             $('.fanyi2-pretranslate-status').text('❌ 处理异常。已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining + '。');
@@ -477,7 +491,7 @@
                             }
                         } else {
                             // 有剩余但本轮无进展，避免误报“完成”
-                            var nextBatchSize = Math.max(10, Math.floor(batchSize / 2));
+                            var nextBatchSize = Math.max(50, Math.floor(batchSize / 2));
                             if (stalledRetries < 3 && nextBatchSize < batchSize) {
                                 var percentRetry = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
                                 $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentRetry + '%');
@@ -488,7 +502,7 @@
                                 return;
                             }
 
-                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                            $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译（后台持续）');
                             var percentStalled = totalStrings > 0 ? Math.round((translatedTotal / totalStrings) * 100) : 0;
                             $('#fanyi2-pretranslate-progress .fanyi2-progress-bar-fill').css('width', percentStalled + '%');
                             $('.fanyi2-pretranslate-status').text('⚠ 本轮未推进。已翻译 ' + translatedTotal + ' / ' + totalStrings + '，剩余 ' + remaining + '。可重试或调小批次。');
@@ -498,11 +512,11 @@
                             }
                         }
 
-                        if (response.data.warnings && response.data.warnings.length && status !== 'running') {
-                            Fanyi2Admin.showAdminNotice('error', '部分批次出现警告：' + response.data.warnings.join(' | '));
+                        if (warnings.length && status !== 'running') {
+                            Fanyi2Admin.showAdminNotice('error', '部分批次出现警告：' + warnings.join(' | '));
                         }
                     } else {
-                        $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                        $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译（后台持续）');
                         var errMsg = response.data && response.data.message ? response.data.message : '处理失败';
                         $('.fanyi2-pretranslate-status').text('❌ ' + errMsg);
                         Fanyi2Admin.showAdminNotice('error', errMsg);
@@ -517,13 +531,235 @@
                         }
                     }
                 },
-                error: function() {
-                    $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译');
+                error: function(xhr, textStatus) {
+                    if (textStatus === 'timeout') {
+                        var retryBatch = Math.max(50, Math.floor(batchSize / 2));
+                        if (stalledRetries < 4 && retryBatch < batchSize) {
+                            $('.fanyi2-pretranslate-status').text('⚠ 请求超时，自动降批到 ' + retryBatch + ' 重试中...（' + (stalledRetries + 1) + '/4）');
+                            setTimeout(function() {
+                                self.runPretranslateBatch(targetLang, scope, retryBatch, totalTranslated, stalledRetries + 1, opts);
+                            }, 300);
+                            return;
+                        }
+                    }
+                    $('#fanyi2-start-pretranslate').prop('disabled', false).text('🚀 开始翻译（后台持续）');
                     $('.fanyi2-pretranslate-status').text('❌ 请求失败');
                     Fanyi2Admin.showAdminNotice('error', '请求失败，请稍后重试');
                     if (typeof opts.onDone === 'function') {
                         opts.onDone('error', {});
                     }
+                }
+            });
+        },
+
+        startBackgroundTranslation: function() {
+            var self = this;
+            var targetLang = $('#fanyi2-batch-target-lang').val();
+            var scope = this.getPretranslateScope();
+            var batchSize = this.getPreferredBatchSize();
+            var $startBtn = $('#fanyi2-start-pretranslate');
+
+            if (!targetLang) {
+                this.showAdminNotice('error', '请先选择目标语言');
+                return;
+            }
+
+            $startBtn.prop('disabled', true).text('启动中...');
+            $('#fanyi2-background-status').text('正在启动后台翻译任务...');
+            $('#fanyi2-pretranslate-progress').show();
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_start_background_translation',
+                    nonce: fanyi2_admin.nonce,
+                    language: targetLang,
+                    scope: scope,
+                    batch_size: batchSize
+                },
+                timeout: 60000,
+                success: function(response) {
+                    if (response && response.success) {
+                        self.showAdminNotice('success', response.data.message || '后台持续翻译已启动');
+                        self.renderBackgroundStatus(response.data.job || {});
+                        self.startBackgroundStatusPolling();
+                    } else {
+                        $startBtn.prop('disabled', false).text('🚀 开始翻译（后台持续）');
+                        self.showAdminNotice('error', (response && response.data && response.data.message) || '启动后台翻译失败');
+                        self.loadBackgroundTranslationStatus();
+                    }
+                },
+                error: function() {
+                    $startBtn.prop('disabled', false).text('🚀 开始翻译（后台持续）');
+                    self.showAdminNotice('error', '启动后台翻译请求失败');
+                    self.loadBackgroundTranslationStatus();
+                }
+            });
+        },
+
+        stopBackgroundTranslation: function() {
+            var self = this;
+            $('#fanyi2-stop-background-translation').prop('disabled', true).text('停止中...');
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_stop_background_translation',
+                    nonce: fanyi2_admin.nonce
+                },
+                timeout: 60000,
+                success: function(response) {
+                    $('#fanyi2-stop-background-translation').prop('disabled', false).text('⏹ 停止后台翻译');
+                    if (response && response.success) {
+                        self.showAdminNotice('success', response.data.message || '后台翻译已停止');
+                        self.stopBackgroundStatusPolling();
+                        self.renderBackgroundStatus(response.data.job || {});
+                    } else {
+                        self.showAdminNotice('error', (response && response.data && response.data.message) || '停止后台翻译失败');
+                        self.loadBackgroundTranslationStatus();
+                    }
+                },
+                error: function() {
+                    $('#fanyi2-stop-background-translation').prop('disabled', false).text('⏹ 停止后台翻译');
+                    self.showAdminNotice('error', '停止后台翻译请求失败');
+                }
+            });
+        },
+
+        loadBackgroundTranslationStatus: function() {
+            var self = this;
+            if ($('#fanyi2-background-status').length === 0) {
+                return;
+            }
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_get_background_translation_status',
+                    nonce: fanyi2_admin.nonce
+                },
+                timeout: 60000,
+                success: function(response) {
+                    if (!response || !response.success) {
+                        return;
+                    }
+                    var job = response.data && response.data.job ? response.data.job : {};
+                    var progress = response.data && response.data.progress ? response.data.progress : null;
+                    self.renderBackgroundStatus(job, progress);
+                    if (job && parseInt(job.running || 0, 10) === 1) {
+                        self.startBackgroundStatusPolling();
+                    } else {
+                        self.stopBackgroundStatusPolling();
+                    }
+                }
+            });
+        },
+
+        renderBackgroundStatus: function(job, progress) {
+            job = job || {};
+            progress = progress || null;
+
+            var running = parseInt(job.running || 0, 10) === 1;
+            var status = job.status || 'idle';
+            var lang = job.language || '-';
+            var scope = job.scope || 'all';
+            var translatedTotal = parseInt((progress && progress.translated_total) || job.translated_total || 0, 10);
+            var totalStrings = parseInt((progress && progress.total_strings) || job.total_strings || 0, 10);
+            var remaining = parseInt((progress && progress.remaining) || job.remaining || 0, 10);
+            var updatedAt = job.updated_at || (progress && progress.updated_at) || '';
+            var message = job.last_message || '';
+            if (message.indexOf('；警告：') !== -1) {
+                message = message.split('；警告：')[0];
+            }
+            if (message.indexOf('警告：') !== -1) {
+                message = message.split('警告：')[0];
+            }
+
+            var statusText = '空闲';
+            if (running || status === 'running') {
+                statusText = '运行中';
+            } else if (status === 'completed') {
+                statusText = '已完成';
+            } else if (status === 'stopped') {
+                statusText = '已停止';
+            } else if (status === 'error') {
+                statusText = '异常';
+            }
+
+            var text = '后台翻译状态：' + statusText + ' | 语言：' + lang + ' | 范围：' + scope;
+            if (totalStrings > 0) {
+                text += ' | 进度：' + translatedTotal + ' / ' + totalStrings + '（剩余 ' + remaining + '）';
+            }
+            if (updatedAt) {
+                text += ' | 更新：' + updatedAt;
+            }
+            if (message && status !== 'running') {
+                text += ' | ' + message;
+            }
+
+            $('#fanyi2-background-status').text(text);
+            $('#fanyi2-start-pretranslate')
+                .prop('disabled', running)
+                .text(running ? '⏳ 后台翻译运行中' : '🚀 开始翻译（后台持续）');
+            $('#fanyi2-stop-background-translation').prop('disabled', !running);
+        },
+
+        startBackgroundStatusPolling: function() {
+            var self = this;
+            self.stopBackgroundStatusPolling();
+            self.backgroundStatusTimer = setInterval(function() {
+                self.loadBackgroundTranslationStatus();
+            }, 5000);
+        },
+
+        stopBackgroundStatusPolling: function() {
+            if (this.backgroundStatusTimer) {
+                clearInterval(this.backgroundStatusTimer);
+                this.backgroundStatusTimer = null;
+            }
+        },
+
+        clearTargetLanguageTranslations: function() {
+            var self = this;
+            var targetLang = $('#fanyi2-batch-target-lang').val();
+            var langName = (fanyi2_admin.languages && fanyi2_admin.languages[targetLang]) ? fanyi2_admin.languages[targetLang] : targetLang;
+
+            if (!targetLang) {
+                this.showAdminNotice('error', '请先选择目标语言');
+                return;
+            }
+
+            if (!window.confirm('确认清空语言 [' + langName + '] 的全部翻译吗？此操作不可撤销。')) {
+                return;
+            }
+
+            $('#fanyi2-clear-target-lang-translations').prop('disabled', true).text('清空中...');
+
+            $.ajax({
+                url: fanyi2_admin.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_clear_language_translations',
+                    nonce: fanyi2_admin.nonce,
+                    language: targetLang
+                },
+                timeout: 60000,
+                success: function(response) {
+                    $('#fanyi2-clear-target-lang-translations').prop('disabled', false).text('🗑 清空目标语言翻译');
+                    if (response && response.success) {
+                        self.showAdminNotice('success', response.data.message || '已清空目标语言翻译');
+                        self.loadPretranslateProgress();
+                        self.loadBackgroundTranslationStatus();
+                    } else {
+                        self.showAdminNotice('error', (response && response.data && response.data.message) || '清空失败');
+                    }
+                },
+                error: function() {
+                    $('#fanyi2-clear-target-lang-translations').prop('disabled', false).text('🗑 清空目标语言翻译');
+                    self.showAdminNotice('error', '清空目标语言翻译请求失败');
                 }
             });
         },
@@ -562,7 +798,7 @@
             var enabledLangs = fanyi2_admin.settings.enabled_languages;
             var defaultLang = fanyi2_admin.settings.default_language;
             var scope = this.getPretranslateScope();
-            var batchSize = 500;
+            var batchSize = this.getPreferredBatchSize();
 
             var targetLangs = enabledLangs.filter(function(lang) {
                 return lang !== defaultLang;
@@ -616,10 +852,16 @@
                 },
                 timeout: 300000,
                 success: function(response) {
-                    if (response.success && response.data.status === 'running' && response.data.remaining > 0 && response.data.translated > 0) {
+                    if (response.success && response.data.status === 'running' && response.data.remaining > 0) {
+                        var warnings = (response.data.warnings && response.data.warnings.length) ? response.data.warnings : [];
+                        var hasTimeoutWarning = warnings.some(function(w) {
+                            var s = String(w || '').toLowerCase();
+                            return s.indexOf('timed out') !== -1 || s.indexOf('curl error 28') !== -1 || s.indexOf('网络超时') !== -1;
+                        });
+                        var nextBatchSize = hasTimeoutWarning ? Math.max(50, Math.floor(batchSize * 0.7)) : batchSize;
                         setTimeout(function() {
-                            self.pretranslateLanguage(lang, scope, batchSize, callback);
-                        }, 10);
+                            self.pretranslateLanguage(lang, scope, nextBatchSize, callback);
+                        }, 50);
                     } else {
                         callback();
                     }

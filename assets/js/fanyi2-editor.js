@@ -88,6 +88,28 @@
         },
 
         /**
+         * 仅替换元素的直接文本节点内容（保留子元素结构）
+         */
+        setDirectText: function(element, text) {
+            var directNodes = [];
+            for (var i = 0; i < element.childNodes.length; i++) {
+                if (element.childNodes[i].nodeType === 3) {
+                    directNodes.push(element.childNodes[i]);
+                }
+            }
+
+            if (directNodes.length === 0) {
+                element.insertBefore(document.createTextNode(text), element.firstChild);
+                return;
+            }
+
+            directNodes[0].textContent = text;
+            for (var j = 1; j < directNodes.length; j++) {
+                directNodes[j].textContent = '';
+            }
+        },
+
+        /**
          * 获取元素的CSS选择器路径
          */
         getSelector: function(element) {
@@ -234,6 +256,7 @@
 
             // 目标语言切换时刷新表格翻译
             $('#fanyi2-editor-target-lang').on('change', function() {
+                self.applyInlineTranslationPreview($(this).val());
                 self.loadExistingTranslations();
                 if ($('#fanyi2-table-modal').is(':visible')) {
                     self.refreshTableTranslations();
@@ -245,6 +268,7 @@
          * 选中一个文本元素（点选翻译）
          */
         selectElement: function(element) {
+            var self = this;
             var $el = $(element);
             var text = $el.attr('data-fanyi2-text') || $el.text().trim();
 
@@ -264,6 +288,12 @@
             var key = this.hashString(text);
             if (this.translations[key] && this.translations[key][targetLang]) {
                 $('#fanyi2-translated-text').val(this.translations[key][targetLang]);
+            } else {
+                this.lookupExistingTranslation(text, targetLang, function(translated) {
+                    if (translated && self.selectedElement === element) {
+                        $('#fanyi2-translated-text').val(translated);
+                    }
+                });
             }
 
             $('#fanyi2-editor-panel').show();
@@ -349,8 +379,9 @@
             // 去重
             var unique = {};
             strings = strings.filter(function(s) {
-                if (unique[s.text]) return false;
-                unique[s.text] = true;
+                var normalized = self.normalizeText(s.text);
+                if (unique[normalized]) return false;
+                unique[normalized] = true;
                 return true;
             });
 
@@ -407,8 +438,9 @@
 
             var unique = {};
             strings = strings.filter(function(s) {
-                if (unique[s.text]) return false;
-                unique[s.text] = true;
+                var normalized = self.normalizeText(s.text);
+                if (unique[normalized]) return false;
+                unique[normalized] = true;
                 return true;
             });
 
@@ -655,6 +687,7 @@
                     self.isTranslating = false;
                     $('#fanyi2-progress-overlay').hide();
                     if (!self.cancelTranslation) {
+                        self.applyInlineTranslationPreview(targetLang);
                         self.showNotice('success', '翻译完成！共翻译 ' + processed + ' 条');
                         self.updateTableStats();
                     }
@@ -744,6 +777,7 @@
                         if (!self.translations[key]) self.translations[key] = {};
                         self.translations[key][targetLang] = response.data.translated;
                         self.updateTableStats();
+                        self.applyInlineTranslationPreview(targetLang);
                     } else {
                         self.showNotice('error', response.data.message);
                     }
@@ -810,6 +844,7 @@
                             }
                         });
                         self.updateTableStats();
+                        self.applyInlineTranslationPreview(targetLang);
                     } else {
                         self.showNotice('error', response.data.message);
                     }
@@ -861,6 +896,7 @@
                         if (!self.translations[key]) self.translations[key] = {};
                         self.translations[key][targetLang] = translated;
                         self.updateTableStats();
+                        self.applyInlineTranslationPreview(targetLang);
                         self.showNotice('success', '已保存');
                     } else {
                         self.showNotice('error', response.data.message);
@@ -905,6 +941,7 @@
                             self.translations[key] = {};
                         }
                         self.translations[key][targetLang] = response.data.translated;
+                        self.applyInlineTranslationPreview(targetLang);
                     } else {
                         self.showNotice('error', response.data.message);
                     }
@@ -955,6 +992,7 @@
                             self.translations[key] = {};
                         }
                         self.translations[key][targetLang] = translated;
+                        self.applyInlineTranslationPreview(targetLang);
 
                         self.showNotice('success', '翻译已保存');
                         $('#fanyi2-editor-panel').hide();
@@ -975,6 +1013,21 @@
         loadExistingTranslations: function() {
             var self = this;
             var targetLang = $('#fanyi2-editor-target-lang').val();
+            var originals = [];
+            var seen = {};
+
+            $('[data-fanyi2-editable]').each(function() {
+                var text = $(this).attr('data-fanyi2-text') || $(this).text().trim();
+                text = (text || '').trim();
+                if (!text) return;
+                var normalized = self.normalizeText(text);
+                if (!normalized || seen[normalized]) return;
+                seen[normalized] = true;
+                originals.push(text);
+            });
+
+            // 先按当前缓存渲染一次，避免切换语言时残留旧语言内容
+            self.applyInlineTranslationPreview(targetLang);
 
             $.ajax({
                 url: fanyi2_vars.ajax_url,
@@ -983,7 +1036,8 @@
                     action: 'fanyi2_get_page_translations',
                     nonce: fanyi2_vars.nonce,
                     page_url: window.location.pathname,
-                    language: targetLang
+                    language: targetLang,
+                    originals: originals
                 },
                 success: function(response) {
                     if (response.success && response.data.translations) {
@@ -997,14 +1051,36 @@
                                 // 标记页面中已翻译的元素
                                 $('[data-fanyi2-editable]').each(function() {
                                     var text = $(this).attr('data-fanyi2-text') || $(this).text().trim();
-                                    if (text === t.original_string && t.translated_string) {
+                                    if (self.normalizeText(text) === self.normalizeText(t.original_string) && t.translated_string) {
                                         $(this).addClass('fanyi2-translated');
                                     }
                                 });
                             }
                         });
+                        self.applyInlineTranslationPreview(targetLang);
                     }
                 }
+            });
+        },
+
+        /**
+         * 编辑模式中渲染“目标语言预览”，但保留 data-fanyi2-text 原文用于保存
+         */
+        applyInlineTranslationPreview: function(targetLang) {
+            var self = this;
+            $('[data-fanyi2-editable]').each(function() {
+                var $el = $(this);
+                var original = $el.attr('data-fanyi2-text') || self.getDirectText(this);
+                original = self.normalizeText(original);
+                if (!original) return;
+
+                var key = self.hashString(original);
+                var translated = '';
+                if (self.translations[key] && self.translations[key][targetLang]) {
+                    translated = self.normalizeText(self.translations[key][targetLang]);
+                }
+
+                self.setDirectText(this, translated || original);
             });
         },
 
@@ -1049,6 +1125,7 @@
          * 简单字符串哈希
          */
         hashString: function(str) {
+            str = this.normalizeText(str);
             var hash = 0;
             for (var i = 0; i < str.length; i++) {
                 var char = str.charCodeAt(i);
@@ -1056,6 +1133,53 @@
                 hash |= 0;
             }
             return 'h' + Math.abs(hash).toString(36);
+        },
+
+        /**
+         * 规范化文本（用于匹配与哈希）
+         */
+        normalizeText: function(str) {
+            str = String(str || '');
+            return str.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+        },
+
+        /**
+         * 按原文即时查询已存在翻译（缓存未命中时）
+         */
+        lookupExistingTranslation: function(originalText, targetLang, done) {
+            var self = this;
+            if (!originalText || !targetLang) {
+                if (typeof done === 'function') done('');
+                return;
+            }
+
+            $.ajax({
+                url: fanyi2_vars.ajax_url,
+                type: 'POST',
+                data: {
+                    action: 'fanyi2_get_page_translations',
+                    nonce: fanyi2_vars.nonce,
+                    page_url: window.location.pathname,
+                    language: targetLang,
+                    originals: [originalText]
+                },
+                success: function(response) {
+                    var translated = '';
+                    if (response && response.success && response.data && response.data.translations && response.data.translations.length) {
+                        var row = response.data.translations[0];
+                        translated = (row && row.translated_string) ? String(row.translated_string).trim() : '';
+                    }
+                    if (translated) {
+                        var key = self.hashString(originalText);
+                        if (!self.translations[key]) self.translations[key] = {};
+                        self.translations[key][targetLang] = translated;
+                    }
+                    if (typeof done === 'function') done(translated);
+                },
+                error: function() {
+                    if (typeof done === 'function') done('');
+                }
+            });
         },
 
         /**

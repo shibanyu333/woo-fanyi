@@ -927,7 +927,8 @@ class Fanyi2_AI_Engine {
                 curl_setopt($ch, CURLOPT_POSTFIELDS, $req['body']);
                 curl_setopt($ch, CURLOPT_HTTPHEADER, $req['headers']);
                 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-                curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+                curl_setopt($ch, CURLOPT_TIMEOUT, 90);
+                curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 20);
                 curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
                 curl_multi_add_handle($mh, $ch);
                 $handles[$idx] = $ch;
