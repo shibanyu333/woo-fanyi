@@ -18,6 +18,8 @@ class Fanyi2_Frontend {
      */
     public static function init() {
         add_action('init', array(__CLASS__, 'maybe_switch_wordpress_locale'), 0);
+        add_action('user_register', array(__CLASS__, 'set_user_locale_on_register'), 20);
+        add_action('woocommerce_created_customer', array(__CLASS__, 'set_user_locale_on_register'), 20);
         add_action('wp_footer', array(__CLASS__, 'render_language_switcher'));
         add_action('wp_footer', array(__CLASS__, 'render_editor_toolbar'));
         add_action('template_redirect', array(__CLASS__, 'detect_and_set_language'), 1);
@@ -74,6 +76,43 @@ class Fanyi2_Frontend {
         if (function_exists('switch_to_locale')) {
             switch_to_locale($target_locale);
             self::$locale_switched = true;
+        }
+    }
+
+    /**
+     * 前台注册后按当前站点语言写入用户 locale（WordPress 用户 Language 列）
+     */
+    public static function set_user_locale_on_register($user_id) {
+        $user_id = absint($user_id);
+        if ($user_id <= 0) {
+            return;
+        }
+
+        // 仅处理前台注册流程，避免影响后台手动创建用户
+        if (is_admin() && !wp_doing_ajax() && !(defined('REST_REQUEST') && REST_REQUEST)) {
+            return;
+        }
+
+        if (wp_doing_cron()) {
+            return;
+        }
+
+        $enabled_languages = get_option('fanyi2_enabled_languages', array('zh', 'en'));
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $language = self::resolve_language_for_locale_switch();
+
+        if (empty($language) || !in_array($language, $enabled_languages, true)) {
+            $language = $default_lang;
+        }
+
+        $target_locale = self::map_language_to_locale($language);
+        if (empty($target_locale)) {
+            return;
+        }
+
+        update_user_meta($user_id, 'locale', $target_locale);
+        if (function_exists('update_user_option')) {
+            update_user_option($user_id, 'locale', $target_locale, false);
         }
     }
 
