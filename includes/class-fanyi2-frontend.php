@@ -46,6 +46,20 @@ class Fanyi2_Frontend {
     }
 
     /**
+     * 是否为后台语言上下文。
+     *
+     * 后台语言必须完全交给 WordPress 用户/站点设置，Fanyi2 只处理前台展示语言。
+     */
+    public static function is_backend_language_context() {
+        if (is_admin() || wp_doing_ajax()) {
+            return true;
+        }
+
+        $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
+        return (strpos($request_uri, '/wp-admin') !== false || strpos($request_uri, 'wp-login.php') !== false);
+    }
+
+    /**
      * 前台/REST 请求按当前语言切换 WP locale（让 Woo 原生语言包生效）
      */
     public static function maybe_switch_wordpress_locale() {
@@ -53,8 +67,8 @@ class Fanyi2_Frontend {
             return;
         }
 
-        // 后台页面保持管理员语言，避免影响后台体验
-        if (is_admin() && !wp_doing_ajax()) {
+        // 后台页面、admin-ajax、登录页保持 WordPress 自己的语言设置。
+        if (self::is_backend_language_context()) {
             return;
         }
 
@@ -80,7 +94,7 @@ class Fanyi2_Frontend {
     }
 
     /**
-     * 前台注册后按当前站点语言写入用户 locale（WordPress 用户 Language 列）
+     * 前台注册后记录站点语言偏好，不写 WordPress 用户 locale，避免影响后台语言。
      */
     public static function set_user_locale_on_register($user_id) {
         $user_id = absint($user_id);
@@ -89,7 +103,7 @@ class Fanyi2_Frontend {
         }
 
         // 仅处理前台注册流程，避免影响后台手动创建用户
-        if (is_admin() && !wp_doing_ajax() && !(defined('REST_REQUEST') && REST_REQUEST)) {
+        if (self::is_backend_language_context() && !(defined('REST_REQUEST') && REST_REQUEST)) {
             return;
         }
 
@@ -105,15 +119,7 @@ class Fanyi2_Frontend {
             $language = $default_lang;
         }
 
-        $target_locale = self::map_language_to_locale($language);
-        if (empty($target_locale)) {
-            return;
-        }
-
-        update_user_meta($user_id, 'locale', $target_locale);
-        if (function_exists('update_user_option')) {
-            update_user_option($user_id, 'locale', $target_locale, false);
-        }
+        update_user_meta($user_id, 'fanyi2_preferred_language', $language);
     }
 
     /**
@@ -372,6 +378,10 @@ class Fanyi2_Frontend {
      * 获取当前语言
      */
     public static function get_current_language() {
+        if (self::is_backend_language_context()) {
+            return get_option('fanyi2_default_language', 'zh');
+        }
+
         if (self::$current_language === null) {
             // 在init之前调用时的处理
             if (isset($_GET['lang'])) {

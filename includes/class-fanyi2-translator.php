@@ -31,12 +31,24 @@ class Fanyi2_Translator {
     }
 
     /**
+     * 后台语言上下文不参与前台翻译。
+     */
+    private static function is_backend_language_context() {
+        return class_exists('Fanyi2_Frontend') && Fanyi2_Frontend::is_backend_language_context();
+    }
+
+    /**
      * 注册 WooCommerce 专用翻译钩子（在 Fanyi2_Frontend::init 中调用）
      */
     public static function register_wc_hooks() {
         if (self::$wc_hooks_registered) {
             return;
         }
+
+        if (self::is_backend_language_context()) {
+            return;
+        }
+
         self::$wc_hooks_registered = true;
 
         $should_translate = self::should_translate_current_request();
@@ -119,6 +131,10 @@ class Fanyi2_Translator {
             return $html;
         }
 
+        if (self::is_backend_language_context()) {
+            return $html;
+        }
+
         $current_lang = Fanyi2_Frontend::get_current_language();
         $default_lang = get_option('fanyi2_default_language', 'zh');
         $target_lang = $current_lang;
@@ -173,6 +189,10 @@ class Fanyi2_Translator {
      * 拦截 gettext（__() / _e() 等）
      */
     public static function filter_gettext($translated, $text, $domain) {
+        if (self::is_backend_language_context()) {
+            return $translated;
+        }
+
         if (!self::is_target_domain($domain)) {
             return $translated;
         }
@@ -185,6 +205,10 @@ class Fanyi2_Translator {
      * 拦截带上下文的 gettext（_x()）
      */
     public static function filter_gettext_with_context($translated, $text, $context, $domain) {
+        if (self::is_backend_language_context()) {
+            return $translated;
+        }
+
         if (!self::is_target_domain($domain)) {
             return $translated;
         }
@@ -197,6 +221,10 @@ class Fanyi2_Translator {
      * 拦截复数形式 gettext（_n()）
      */
     public static function filter_ngettext($translated, $single, $plural, $number, $domain) {
+        if (self::is_backend_language_context()) {
+            return $translated;
+        }
+
         if (!self::is_target_domain($domain)) {
             return $translated;
         }
@@ -209,6 +237,10 @@ class Fanyi2_Translator {
      * 拦截带上下文复数形式 gettext（_nx()）
      */
     public static function filter_ngettext_with_context($translated, $single, $plural, $number, $context, $domain) {
+        if (self::is_backend_language_context()) {
+            return $translated;
+        }
+
         if (!self::is_target_domain($domain)) {
             return $translated;
         }
@@ -234,6 +266,10 @@ class Fanyi2_Translator {
      * 是否需要在当前请求执行翻译（非默认语言）
      */
     private static function should_translate_current_request() {
+        if (self::is_backend_language_context()) {
+            return false;
+        }
+
         $current_lang = Fanyi2_Frontend::get_current_language();
         $default_lang = get_option('fanyi2_default_language', 'zh');
         if (empty($current_lang)) {
@@ -292,6 +328,10 @@ class Fanyi2_Translator {
      * 过滤 Woo Store API 响应，翻译其中文本字段
      */
     public static function filter_store_api_response($result, $server, $request) {
+        if (self::is_backend_language_context()) {
+            return $result;
+        }
+
         if (!is_array($result) && !is_object($result)) {
             return $result;
         }
@@ -312,6 +352,10 @@ class Fanyi2_Translator {
      * 过滤 JS i18n 翻译 JSON，覆盖 Woo Blocks（Cart / Checkout）前端文案
      */
     public static function filter_script_translations($translations, $file, $handle, $domain) {
+        if (self::is_backend_language_context()) {
+            return $translations;
+        }
+
         if (empty($translations) || !is_string($translations)) {
             return $translations;
         }
@@ -464,6 +508,10 @@ class Fanyi2_Translator {
      * 运行期自动抓取 gettext 字符串，便于后台补翻译
      */
     private static function capture_runtime_string($text, $domain = 'woocommerce', $context = '') {
+        if (self::is_backend_language_context()) {
+            return;
+        }
+
         if (empty($text) || !is_string($text)) {
             return;
         }

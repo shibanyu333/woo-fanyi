@@ -208,6 +208,10 @@ final class Fanyi2 {
         }
 
         $request_uri = isset($_SERVER['REQUEST_URI']) ? $_SERVER['REQUEST_URI'] : '';
+        if (is_admin() || strpos($request_uri, '/wp-admin') !== false || strpos($request_uri, 'wp-login.php') !== false) {
+            return;
+        }
+
         if (!isset($_SERVER['FANYI2_ORIGINAL_REQUEST_URI'])) {
             $_SERVER['FANYI2_ORIGINAL_REQUEST_URI'] = $request_uri;
         }
