@@ -764,21 +764,36 @@
             });
         },
 
-        applyDefaultLanguageCleanup: function() {
+        applyDefaultLanguageCleanup: function(confirmWrite) {
+            var self = this;
+            var writeConfirmed = confirmWrite === true;
+            $('.fanyi2-pretranslate-status').text(writeConfirmed ? '正在写入默认语言清洗结果...' : '正在生成默认语言清洗预览...');
+
             $.ajax({
                 url: fanyi2_admin.ajax_url,
                 type: 'POST',
                 data: {
                     action: 'fanyi2_apply_default_language_cleanup',
                     nonce: fanyi2_admin.nonce,
+                    confirm: writeConfirmed ? '1' : '0'
                 },
                 timeout: 600000,
                 success: function(response) {
                     if (response && response.success) {
                         var stats = (response.data && response.data.stats) || {};
-                        var summary = '默认语言清洗完成：内容 ' + (stats.posts_updated || 0) + '、内容元数据 ' + (stats.postmeta_updated || 0) +
+                        var summary = (writeConfirmed ? '默认语言清洗完成：' : '默认语言清洗预览：') +
+                            '内容 ' + (stats.posts_updated || 0) + '、内容元数据 ' + (stats.postmeta_updated || 0) +
                             '、菜单 ' + (stats.menu_items_updated || 0) + '、分类 ' + (stats.terms_updated || 0) +
                             '、分类元数据 ' + (stats.termmeta_updated || 0) + '、站点设置 ' + (stats.options_updated || 0) + '。';
+                        if (response.data && response.data.requires_confirmation) {
+                            $('.fanyi2-pretranslate-status').text('⚠️ ' + summary);
+                            if (window.confirm(summary + '\n\n确认将这些替换写入数据库吗？此操作会修改站点内容，请确认已有备份。')) {
+                                self.applyDefaultLanguageCleanup(true);
+                            } else {
+                                Fanyi2Admin.showAdminNotice('info', '已取消默认语言清洗写库');
+                            }
+                            return;
+                        }
                         $('.fanyi2-pretranslate-status').text('✅ ' + summary);
                         Fanyi2Admin.showAdminNotice('success', summary);
                     } else {

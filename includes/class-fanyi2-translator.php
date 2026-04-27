@@ -128,8 +128,10 @@ class Fanyi2_Translator {
             return $html;
         }
 
-        // 自动抓取当前页面可见文本，提升“前端所见即所得”覆盖率
-        self::capture_visible_strings_from_html($html);
+        // 运行期抓取默认关闭，避免匿名前台访问造成写库放大和性能抖动。
+        if (self::should_capture_runtime_strings()) {
+            self::capture_visible_strings_from_html($html);
+        }
 
         if ($current_lang === $default_lang) {
             return $html;
@@ -146,6 +148,23 @@ class Fanyi2_Translator {
         $html = self::rewrite_internal_urls($html, $target_lang);
 
         return $html;
+    }
+
+    /**
+     * 是否在当前请求自动抓取前台可见文本。
+     */
+    private static function should_capture_runtime_strings() {
+        $enabled = get_option('fanyi2_runtime_capture_enabled', '0') === '1';
+        $enabled = apply_filters('fanyi2_capture_runtime_strings', $enabled);
+        if (!$enabled) {
+            return false;
+        }
+
+        if (is_admin() || wp_doing_ajax() || wp_doing_cron()) {
+            return false;
+        }
+
+        return true;
     }
 
     // ====== gettext 拦截 (覆盖 WooCommerce / WordPress 核心文本) ======
@@ -364,8 +383,12 @@ class Fanyi2_Translator {
     /**
      * 递归翻译 Store API 数据
      */
-    private static function translate_store_api_data($data) {
+    private static function translate_store_api_data($data, $key_name = '', $parent_key = '') {
         if (is_string($data)) {
+            if (!self::is_store_api_translatable_key($key_name, $parent_key)) {
+                return $data;
+            }
+
             $text = trim($data);
 
             if ($text === '' || mb_strlen($text) < 2 || mb_strlen($text) > 200) {
@@ -388,19 +411,53 @@ class Fanyi2_Translator {
 
         if (is_array($data)) {
             foreach ($data as $key => $value) {
-                $data[$key] = self::translate_store_api_data($value);
+                $data[$key] = self::translate_store_api_data($value, (string) $key, (string) $key_name);
             }
             return $data;
         }
 
         if (is_object($data)) {
             foreach ($data as $key => $value) {
-                $data->{$key} = self::translate_store_api_data($value);
+                $data->{$key} = self::translate_store_api_data($value, (string) $key, (string) $key_name);
             }
             return $data;
         }
 
         return $data;
+    }
+
+    /**
+     * Store API 中只翻译明确展示给用户的字段，避免破坏协议值/枚举/货币代码。
+     */
+    private static function is_store_api_translatable_key($key_name, $parent_key = '') {
+        $key = strtolower((string) $key_name);
+        if ($key !== '' && ctype_digit($key)) {
+            $key = strtolower((string) $parent_key);
+        }
+
+        if ($key === '') {
+            return false;
+        }
+
+        $allowed = array(
+            'name',
+            'title',
+            'label',
+            'description',
+            'short_description',
+            'summary',
+            'text',
+            'message',
+            'messages',
+            'notice',
+            'notices',
+            'content',
+            'heading',
+            'placeholder',
+            'button_text',
+        );
+
+        return in_array($key, $allowed, true);
     }
 
     /**
@@ -1272,8 +1329,8 @@ class Fanyi2_Translator {
                 $html = $new_html;
             }
 
-            $placeholders[$ph_tag]  = $translated;
-            $placeholders[$ph_attr] = $translated;
+            $placeholders[$ph_tag]  = esc_html((string) $translated);
+            $placeholders[$ph_attr] = esc_attr((string) $translated);
             $index++;
         }
 
