@@ -249,6 +249,66 @@ class Fanyi2_Database {
     }
 
     /**
+     * 获取 AI/记忆写入的“译文等于原文”记录，用于后台翻译重试修复。
+     */
+    public static function get_identity_translation_rows($language, $scope = 'all', $limit = 500) {
+        global $wpdb;
+
+        $equivalent_languages = self::get_equivalent_translation_languages($language);
+        $scope_conditions = self::get_scope_sql_conditions($scope);
+        $table_strings = $wpdb->prefix . self::TABLE_STRINGS;
+        $table_trans = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $lang_placeholders = implode(',', array_fill(0, count($equivalent_languages), '%s'));
+        $limit = max(1, min(1000, intval($limit)));
+        $params = array_merge($equivalent_languages, $scope_conditions['params'], array($limit));
+
+        return $wpdb->get_results($wpdb->prepare(
+            "SELECT t.id AS translation_id, t.string_id, t.translation_source, s.original_string, t.translated_string
+             FROM $table_trans t
+             INNER JOIN $table_strings s ON s.id = t.string_id
+             WHERE t.language IN ($lang_placeholders)
+               AND t.status = 'published'
+               AND t.translation_source IN ('ai', 'memory')
+               AND s.status = 'active'
+               {$scope_conditions['sql']}
+               AND BINARY t.translated_string = BINARY s.original_string
+             ORDER BY CHAR_LENGTH(s.original_string) DESC, t.updated_at ASC
+             LIMIT %d",
+            $params
+        ));
+    }
+
+    /**
+     * 将翻译记录标记为非发布状态，使后台翻译可重新生成。
+     */
+    public static function mark_translations_status($translation_ids, $status = 'draft') {
+        global $wpdb;
+
+        if (!is_array($translation_ids) || empty($translation_ids)) {
+            return 0;
+        }
+
+        $ids = array_values(array_unique(array_filter(array_map('intval', $translation_ids))));
+        if (empty($ids)) {
+            return 0;
+        }
+
+        $status = sanitize_key((string) $status);
+        if ($status === '') {
+            $status = 'draft';
+        }
+
+        $table = $wpdb->prefix . self::TABLE_TRANSLATIONS;
+        $placeholders = implode(',', array_fill(0, count($ids), '%d'));
+        $params = array_merge(array($status), $ids);
+
+        return (int) $wpdb->query($wpdb->prepare(
+            "UPDATE $table SET status = %s, updated_at = CURRENT_TIMESTAMP WHERE id IN ($placeholders)",
+            $params
+        ));
+    }
+
+    /**
      * 获取翻译
      */
     public static function get_translation($original_string, $language) {

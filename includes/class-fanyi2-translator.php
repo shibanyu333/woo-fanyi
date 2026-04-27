@@ -1235,6 +1235,10 @@ class Fanyi2_Translator {
             return true;
         }
 
+        if (preg_match('/^(?:width=device-width(?:,\s*)?)?initial-scale=|^width=device-width\b|^max-image-preview:|^(?:index|noindex|follow|nofollow)(?:\s*,\s*(?:index|noindex|follow|nofollow))*$/i', $text)) {
+            return true;
+        }
+
         if (preg_match('/@media\s+[^{]+\{|\{[^}]*margin-top:\s*32px\s*!important;?[^}]*\}/i', $text)) {
             return true;
         }

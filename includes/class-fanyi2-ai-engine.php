@@ -301,7 +301,7 @@ class Fanyi2_AI_Engine {
                "2. Preserve HTML tags, placeholders, and special characters.\n" .
                "3. Keep the same tone and style.\n" .
                "4. Do not add any explanation or notes.\n" .
-               "5. If the text contains technical terms or brand names, keep them as-is.\n\n" .
+               "5. Keep only real brand names, model numbers, placeholders, and units as-is; translate the surrounding sentence.\n\n" .
                "Text to translate:\n{$text}";
     }
 
@@ -323,7 +323,7 @@ class Fanyi2_AI_Engine {
                "2. Preserve HTML tags, placeholders, and special characters.\n" .
                "3. Keep the same tone and style.\n" .
                "4. Do not add any explanation or notes.\n" .
-               "5. If the text contains technical terms or brand names, keep them as-is.\n\n" .
+               "5. Keep only real brand names, model numbers, placeholders, and units as-is; translate the surrounding sentence.\n\n" .
                "Texts to translate:\n{$combined_text}";
     }
 

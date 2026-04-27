@@ -227,11 +227,15 @@ class Fanyi2_Ajax {
     /**
      * 是否应拒绝 AI 译文写库（译文像代码噪声而原文不是）
      */
-    private static function should_reject_ai_translation($original, $translated) {
+    private static function should_reject_ai_translation($original, $translated, $target_language = '', $source_language = '') {
         $original = trim((string) $original);
         $translated = trim((string) $translated);
-        if ($original === '' || $translated === '' || $original === $translated) {
+        if ($original === '' || $translated === '') {
             return false;
+        }
+
+        if ($original === $translated) {
+            return self::looks_like_untranslated_identity($original, $target_language, $source_language);
         }
 
         if (!self::looks_like_code_noise($translated)) {
@@ -239,6 +243,101 @@ class Fanyi2_Ajax {
         }
 
         return !self::looks_like_code_noise($original);
+    }
+
+    /**
+     * 模型偶尔会把多词文案原样返回；这类译文不能算完成。
+     */
+    private static function looks_like_untranslated_identity($text, $target_language = '', $source_language = '') {
+        $text = trim((string) $text);
+        if ($text === '' || !preg_match('/[\p{L}]/u', $text)) {
+            return false;
+        }
+
+        $target_language = Fanyi2_Database::resolve_translation_language($target_language);
+        $source_language = Fanyi2_Database::resolve_translation_language($source_language);
+        if ($target_language !== '' && $source_language !== '' && $source_language !== 'auto' && $target_language === $source_language) {
+            return false;
+        }
+
+        if (filter_var($text, FILTER_VALIDATE_URL) || filter_var($text, FILTER_VALIDATE_EMAIL)) {
+            return false;
+        }
+
+        if (self::text_contains_target_language_script($text, $target_language)) {
+            return false;
+        }
+
+        if (self::target_language_uses_distinct_script($target_language)
+            && preg_match('/^[A-Za-z][A-Za-z-]{2,}$/', $text)
+            && !preg_match('/^[A-Z0-9_-]+$/', $text)
+            && !preg_match('/\d/', $text)
+            && !preg_match('/[a-z][A-Z]|[A-Z][a-z]+[A-Z]/', $text)) {
+            return true;
+        }
+
+        $latin_word_count = preg_match_all('/\b[A-Za-z]{2,}\b/u', $text, $matches);
+        if ($latin_word_count >= 2) {
+            return true;
+        }
+
+        return mb_strlen($text) > 30 && preg_match('/[A-Za-z]/', $text);
+    }
+
+    /**
+     * 用目标语种脚本判断“原样返回”是否可能已经是目标语言。
+     */
+    private static function text_contains_target_language_script($text, $target_language) {
+        $text = (string) $text;
+        switch ($target_language) {
+            case 'ko':
+                return preg_match('/[가-힣]/u', $text) === 1;
+            case 'ja':
+                return preg_match('/[\x{3040}-\x{30ff}\x{3400}-\x{9fff}]/u', $text) === 1;
+            case 'zh':
+            case 'tw':
+            case 'hk':
+                return preg_match('/[\x{3400}-\x{9fff}]/u', $text) === 1;
+            case 'ru':
+                return preg_match('/\p{Cyrillic}/u', $text) === 1;
+            case 'ar':
+                return preg_match('/\p{Arabic}/u', $text) === 1;
+            default:
+                return false;
+        }
+    }
+
+    /**
+     * 目标语种使用明显不同脚本时，单个英文词原样返回也多半是漏翻。
+     */
+    private static function target_language_uses_distinct_script($target_language) {
+        return in_array($target_language, array('ko', 'ja', 'zh', 'tw', 'hk', 'ru', 'ar'), true);
+    }
+
+    /**
+     * 把 AI/记忆生成的“原样译文”退回待翻译队列。
+     */
+    private static function demote_suspect_identity_translations($language, $scope = 'all', $source_language = 'auto') {
+        $rows = Fanyi2_Database::get_identity_translation_rows($language, $scope, 500);
+        if (empty($rows)) {
+            return 0;
+        }
+
+        $translation_ids = array();
+        foreach ($rows as $row) {
+            if (empty($row->translation_id) || !isset($row->original_string, $row->translated_string)) {
+                continue;
+            }
+            if (self::should_reject_ai_translation($row->original_string, $row->translated_string, $language, $source_language)) {
+                $translation_ids[] = (int) $row->translation_id;
+            }
+        }
+
+        if (empty($translation_ids)) {
+            return 0;
+        }
+
+        return Fanyi2_Database::mark_translations_status($translation_ids, 'draft');
     }
 
     /**
@@ -271,7 +370,7 @@ class Fanyi2_Ajax {
             }
 
             $translated = trim((string) $translated);
-            if ($translated !== '') {
+            if ($translated !== '' && !self::should_reject_ai_translation($texts_for_ai[$string_id], $translated, $language, $source_language)) {
                 $translations[$string_id] = $translated;
             }
         }
@@ -302,7 +401,7 @@ class Fanyi2_Ajax {
                 }
 
                 $single = trim((string) $single);
-                if ($single !== '') {
+                if ($single !== '' && !self::should_reject_ai_translation($texts_for_ai[$string_id], $single, $language, $source_language)) {
                     $translations[$string_id] = $single;
                 }
             }
@@ -656,7 +755,7 @@ class Fanyi2_Ajax {
             set_time_limit(300);
         }
 
-        $source_language = $force_default_mode ? 'auto' : $default_language;
+        $source_language = 'auto';
         $total_strings = Fanyi2_Database::count_active_strings($scope);
 
         // 大批量时自动降低单请求轮数（并行处理后每轮吞吐更高，但仍需控制总时长）
@@ -672,11 +771,15 @@ class Fanyi2_Ajax {
         $attempted_ai_items = 0;
         $stop_processing = false;
 
-        // 翻译记忆复用：规范化原文一致则直接沿用已有译文，减少AI调用
-        $memory_map = Fanyi2_Database::get_translation_memory_map($language);
         $saved_from_memory = 0;
         $saved_from_ai = 0;
         $warnings = array();
+        $demoted_identity = self::demote_suspect_identity_translations($language, $scope, $source_language);
+        if ($demoted_identity > 0) {
+            $warnings[] = sprintf('已将 %d 条原样译文退回待翻译队列', $demoted_identity);
+        }
+        // 翻译记忆复用：规范化原文一致则直接沿用已有译文，减少AI调用
+        $memory_map = Fanyi2_Database::get_translation_memory_map($language);
         $had_timeout_error = false;
         $round_count = 0;
 
@@ -784,8 +887,9 @@ class Fanyi2_Ajax {
                             if ($translated === '') {
                                 continue;
                             }
-                            if (isset($texts_for_ai[$string_id]) && self::should_reject_ai_translation($texts_for_ai[$string_id], $translated)) {
+                            if (isset($texts_for_ai[$string_id]) && self::should_reject_ai_translation($texts_for_ai[$string_id], $translated, $language, $source_language)) {
                                 $warnings[] = sprintf('已跳过疑似异常译文（ID %d）', intval($string_id));
+                                $fallback_items[$string_id] = $texts_for_ai[$string_id];
                                 continue;
                             }
                             $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $language, $translated, 'ai');
@@ -849,9 +953,8 @@ class Fanyi2_Ajax {
                                 if ($translated === '' || !isset($fallback_items[$sid])) {
                                     continue;
                                 }
-                                if (self::should_reject_ai_translation($fallback_items[$sid], $translated)) {
+                                if (self::should_reject_ai_translation($fallback_items[$sid], $translated, $language, $source_language)) {
                                     $warnings[] = sprintf('已跳过疑似异常重试译文（ID %d）', intval($sid));
-                                    unset($fallback_items[$sid]);
                                     continue;
                                 }
                                 $saved_id = Fanyi2_Database::save_translation_if_missing($sid, $language, $translated, 'ai');
@@ -888,7 +991,7 @@ class Fanyi2_Ajax {
                             }
                             $single = trim((string) $single);
                             if ($single === '') continue;
-                            if (self::should_reject_ai_translation($txt, $single)) {
+                            if (self::should_reject_ai_translation($txt, $single, $language, $source_language)) {
                                 $warnings[] = sprintf('已跳过疑似异常单条译文（ID %d）', intval($sid));
                                 continue;
                             }
@@ -980,6 +1083,11 @@ class Fanyi2_Ajax {
                     if ($probe_result === '') {
                         $probe_errors++;
                         $warnings[] = '自动单条补译返回空内容';
+                        continue;
+                    }
+                    if (self::should_reject_ai_translation($probe->original_string, $probe_result, $language, $source_language)) {
+                        $probe_errors++;
+                        $warnings[] = '自动单条补译返回疑似未翻译内容';
                         continue;
                     }
 
@@ -1489,15 +1597,19 @@ class Fanyi2_Ajax {
             set_time_limit(55);
         }
 
-        $source_language = $force_default_mode ? 'auto' : $default_language;
-        $total_strings = Fanyi2_Database::count_active_strings($scope);
-        $query_limit = min(400, max(120, $batch_size * 2));
-        $untranslated = Fanyi2_Database::get_untranslated_strings($canonical_language, $query_limit, $scope);
-
         $saved_from_memory = 0;
         $saved_from_ai = 0;
         $warnings = array();
         $round_translated_texts = array();
+        $source_language = 'auto';
+        $demoted_identity = self::demote_suspect_identity_translations($canonical_language, $scope, $source_language);
+        if ($demoted_identity > 0) {
+            $warnings[] = sprintf('已将 %d 条原样译文退回待翻译队列', $demoted_identity);
+        }
+
+        $total_strings = Fanyi2_Database::count_active_strings($scope);
+        $query_limit = min(400, max(120, $batch_size * 2));
+        $untranslated = Fanyi2_Database::get_untranslated_strings($canonical_language, $query_limit, $scope);
 
         if (!empty($untranslated)) {
             $memory_map = Fanyi2_Database::get_translation_memory_map($canonical_language);
@@ -1586,8 +1698,9 @@ class Fanyi2_Ajax {
                         if ($translated === '' || !isset($texts_for_ai[$string_id])) {
                             continue;
                         }
-                        if (self::should_reject_ai_translation($texts_for_ai[$string_id], $translated)) {
+                        if (self::should_reject_ai_translation($texts_for_ai[$string_id], $translated, $canonical_language, $source_language)) {
                             $warnings[] = sprintf('已跳过疑似异常译文（ID %d）', intval($string_id));
+                            $fallback_items[$string_id] = $texts_for_ai[$string_id];
                             continue;
                         }
                         $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $canonical_language, $translated, 'ai');
@@ -1623,7 +1736,7 @@ class Fanyi2_Ajax {
                         if ($translated === '' || !isset($fallback_items[$string_id])) {
                             continue;
                         }
-                        if (self::should_reject_ai_translation($fallback_items[$string_id], $translated)) {
+                        if (self::should_reject_ai_translation($fallback_items[$string_id], $translated, $canonical_language, $source_language)) {
                             $warnings[] = sprintf('已跳过疑似异常兜底译文（ID %d）', intval($string_id));
                             continue;
                         }
