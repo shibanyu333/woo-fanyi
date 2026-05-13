@@ -153,19 +153,37 @@ class Fanyi2_Batch {
      * 短代码默认文案等只有在页面渲染后才会出现。这里仅在管理员主动扫描时运行。
      */
     private static function scan_rendered_frontend_pages($urls = array()) {
-        $urls = self::build_render_scan_urls($urls);
-        if (empty($urls)) {
+        $queue = self::build_render_scan_urls($urls);
+        if (empty($queue)) {
             return 0;
         }
 
         $count = 0;
+        $scanned = array();
+        $queued = array();
+        foreach ($queue as $queued_url) {
+            $normalized_url = self::normalize_render_scan_url($queued_url);
+            if ($normalized_url !== '') {
+                $queued[$normalized_url] = true;
+            }
+        }
+
+        $max_urls = (int) apply_filters('fanyi2_render_scan_max_urls', 80);
+        $max_urls = max(1, min(150, $max_urls));
         $default_language = sanitize_key((string) get_option('fanyi2_default_language', 'zh'));
         $language_cookie = sprintf(
             'fanyi2_user_selected=1; fanyi2_manual_lang=%1$s; fanyi2_language=%1$s',
             rawurlencode($default_language)
         );
 
-        foreach ($urls as $url) {
+        while (!empty($queue) && count($scanned) < $max_urls) {
+            $url = array_shift($queue);
+            $url = self::normalize_render_scan_url($url);
+            if ($url === '' || isset($scanned[$url])) {
+                continue;
+            }
+            $scanned[$url] = true;
+
             foreach (self::get_render_scan_url_variants($url) as $scan_url) {
                 $response = null;
                 foreach (self::get_render_request_candidates($scan_url) as $candidate) {
@@ -199,6 +217,19 @@ class Fanyi2_Batch {
                 }
 
                 $count += self::register_rendered_html_strings($html, $url, self::infer_rendered_page_domain($url));
+                foreach (self::extract_render_scan_links($html, $url) as $linked_url) {
+                    if (isset($queued[$linked_url]) || isset($scanned[$linked_url])) {
+                        continue;
+                    }
+                    if ((count($queued) + count($scanned)) >= $max_urls) {
+                        break;
+                    }
+                    $queued[$linked_url] = true;
+                    $queue[] = $linked_url;
+                }
+
+                // A successful rendered variant is enough for this canonical URL.
+                break;
             }
         }
 
@@ -249,6 +280,21 @@ class Fanyi2_Batch {
 
         $add_url(home_url('/'));
 
+        $menus = wp_get_nav_menus();
+        if ($menus) {
+            foreach ($menus as $menu) {
+                $items = wp_get_nav_menu_items($menu->term_id);
+                if (!$items) {
+                    continue;
+                }
+                foreach ($items as $item) {
+                    if (!empty($item->url)) {
+                        $add_url($item->url);
+                    }
+                }
+            }
+        }
+
         if (function_exists('wc_get_page_permalink')) {
             foreach (array('shop', 'cart', 'checkout', 'myaccount') as $wc_page) {
                 $add_url(wc_get_page_permalink($wc_page));
@@ -294,6 +340,119 @@ class Fanyi2_Batch {
         $max_urls = max(1, min(100, $max_urls));
 
         return array_slice(array_keys($collected), 0, $max_urls);
+    }
+
+    /**
+     * 从已渲染页面继续发现前台链接，覆盖查询参数驱动的分类页/筛选页。
+     */
+    private static function extract_render_scan_links($html, $base_url) {
+        if (!is_string($html) || $html === '') {
+            return array();
+        }
+
+        $links = array();
+        if (!preg_match_all('/<a\b[^>]*\shref\s*=\s*(["\'])(.*?)\1/is', $html, $matches)) {
+            return array();
+        }
+
+        foreach ($matches[2] as $href) {
+            $url = self::normalize_render_scan_url($href, $base_url);
+            if ($url !== '') {
+                $links[$url] = true;
+            }
+        }
+
+        return array_keys($links);
+    }
+
+    /**
+     * 规范化待扫描 URL，并过滤后台、资源、外链、语言切换链接等非内容页。
+     */
+    private static function normalize_render_scan_url($url, $base_url = '') {
+        $url = html_entity_decode(trim((string) $url), ENT_QUOTES | ENT_HTML5, 'UTF-8');
+        if ($url === ''
+            || $url[0] === '#'
+            || strncasecmp($url, 'javascript:', 11) === 0
+            || strncasecmp($url, 'mailto:', 7) === 0
+            || strncasecmp($url, 'tel:', 4) === 0
+            || strncasecmp($url, 'data:', 5) === 0) {
+            return '';
+        }
+
+        $home_url = home_url('/');
+        $home_parts = wp_parse_url($home_url);
+        $home_scheme = isset($home_parts['scheme']) ? $home_parts['scheme'] : 'http';
+        $home_host = isset($home_parts['host']) ? strtolower((string) $home_parts['host']) : '';
+        $home_port = isset($home_parts['port']) ? intval($home_parts['port']) : 0;
+
+        if (strpos($url, '//') === 0) {
+            $url = $home_scheme . ':' . $url;
+        } elseif (strpos($url, '/') === 0) {
+            $url = rtrim($home_url, '/') . $url;
+        } elseif (!preg_match('/^[a-z][a-z0-9+\-.]*:\/\//i', $url)) {
+            $base = $base_url !== '' ? $base_url : $home_url;
+            $base_parts = wp_parse_url($base);
+            $base_path = isset($base_parts['path']) ? (string) $base_parts['path'] : '/';
+            $base_dir = preg_replace('#/[^/]*$#', '/', $base_path);
+            $url = rtrim($home_url, '/') . '/' . ltrim($base_dir . $url, '/');
+        }
+
+        $url = esc_url_raw($url);
+        $parts = wp_parse_url($url);
+        if (empty($parts['host'])) {
+            return '';
+        }
+
+        $host = strtolower((string) $parts['host']);
+        $port = isset($parts['port']) ? intval($parts['port']) : 0;
+        if ($host !== $home_host || $port !== $home_port) {
+            return '';
+        }
+
+        $path = isset($parts['path']) && $parts['path'] !== '' ? (string) $parts['path'] : '/';
+        $path_lower = strtolower($path);
+        if (preg_match('#/(wp-admin|wp-login\.php|wp-json|wp-content|wp-includes)(/|$)#i', $path)
+            || preg_match('#/(?:comments/)?feed/?$#i', rtrim($path, '/') . '/')
+            || preg_match('/\.(?:css|js|json|xml|txt|jpg|jpeg|png|gif|webp|svg|ico|pdf|zip|rar|mp4|webm|mp3|woff2?|ttf|eot)$/i', $path_lower)) {
+            return '';
+        }
+
+        $enabled = get_option('fanyi2_enabled_languages', array());
+        $default_lang = get_option('fanyi2_default_language', 'zh');
+        $segments = explode('/', ltrim($path, '/'));
+        $first_segment = isset($segments[0]) ? sanitize_key($segments[0]) : '';
+        if ($first_segment !== '' && in_array($first_segment, $enabled, true) && $first_segment !== $default_lang) {
+            return '';
+        }
+
+        $query = array();
+        if (!empty($parts['query'])) {
+            parse_str($parts['query'], $query);
+            foreach (array_keys($query) as $key) {
+                if (preg_match('/^(?:replytocom|add-to-cart|remove_item|wc-ajax|preview|customize_changeset_uuid|nonce|_wpnonce|fanyi2_editor)$/i', (string) $key)) {
+                    unset($query[$key]);
+                }
+            }
+            if (isset($query['feed'])) {
+                return '';
+            }
+            if (isset($query['lang']) && $query['lang'] !== $default_lang) {
+                return '';
+            }
+            unset($query['lang']);
+            ksort($query);
+        }
+
+        $normalized = $home_scheme . '://' . $home_host;
+        if ($home_port > 0) {
+            $normalized .= ':' . $home_port;
+        }
+        $normalized .= $path;
+        if (!empty($query)) {
+            $normalized .= '?' . http_build_query($query);
+        }
+
+        return $normalized;
     }
 
     /**
@@ -543,6 +702,10 @@ class Fanyi2_Batch {
         }
 
         if (preg_match('/(?:admin-bar-inline-css|wpadminbar|sourceURL=)/i', $text)) {
+            return true;
+        }
+
+        if (preg_match('/(?:».*\bFeed|\bComments Feed)$/i', $text)) {
             return true;
         }
 
