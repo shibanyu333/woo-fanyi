@@ -73,11 +73,7 @@ class Fanyi2_AI_Engine {
         }
 
         // 将文本数组合并为一个请求以减少API调用
-        $numbered_texts = array();
-        foreach (array_values($texts) as $index => $text) {
-            $numbered_texts[] = ($index + 1) . ". " . $text;
-        }
-        $combined_text = implode("\n", $numbered_texts);
+        $combined_text = self::build_numbered_text($texts);
 
         $prompt = self::build_batch_prompt($combined_text, count($texts), $target_language, $source_language);
 
@@ -306,6 +302,30 @@ class Fanyi2_AI_Engine {
     }
 
     /**
+     * 构建"编号 + 单行"的批量输入。
+     *
+     * 批量协议靠行首编号还原顺序，原文里的换行会让模型输出多出若干行，
+     * 解析时整批错位——A 的译文会被写到 B 的 string_id 上。所以送进
+     * prompt 前必须把每条原文压成一行。
+     */
+    private static function build_numbered_text($texts) {
+        $numbered_texts = array();
+        foreach (array_values($texts) as $index => $text) {
+            $single_line = trim((string) preg_replace('/\s*\R\s*/u', ' ', (string) $text));
+            $numbered_texts[] = ($index + 1) . '. ' . $single_line;
+        }
+
+        return implode("\n", $numbered_texts);
+    }
+
+    /**
+     * 单次请求的最大输出 token 数（长文本站点可通过 filter 调大）
+     */
+    private static function get_max_tokens($engine = '') {
+        return (int) apply_filters('fanyi2_ai_max_tokens', 4096, $engine);
+    }
+
+    /**
      * 构建批量翻译提示
      */
     private static function build_batch_prompt($combined_text, $count, $target_language, $source_language) {
@@ -386,7 +406,7 @@ class Fanyi2_AI_Engine {
 
         $body = array(
             'model'      => $model,
-            'max_tokens' => 4096,
+            'max_tokens' => self::get_max_tokens('claude'),
             'messages'   => array(
                 array(
                     'role'    => 'user',
@@ -462,7 +482,7 @@ class Fanyi2_AI_Engine {
                 ),
             ),
             'temperature' => 0.3,
-            'max_tokens'  => 4096,
+            'max_tokens'  => self::get_max_tokens(),
         );
 
         $response = wp_remote_post($api_url, array(
@@ -760,11 +780,7 @@ class Fanyi2_AI_Engine {
         $prompts     = array();
         $chunk_texts = array();
         foreach ($chunks as $idx => $texts) {
-            $numbered = array();
-            foreach (array_values($texts) as $i => $text) {
-                $numbered[] = ($i + 1) . '. ' . $text;
-            }
-            $combined = implode("\n", $numbered);
+            $combined = self::build_numbered_text($texts);
             $prompts[$idx]     = self::build_batch_prompt($combined, count($texts), $target_language, $source_language);
             $chunk_texts[$idx] = $texts;
         }
@@ -843,7 +859,7 @@ class Fanyi2_AI_Engine {
         if ($engine === 'claude') {
             $body = json_encode(array(
                 'model'      => $model,
-                'max_tokens' => 4096,
+                'max_tokens' => self::get_max_tokens('claude'),
                 'messages'   => array(array('role' => 'user', 'content' => $prompt)),
             ));
             $headers = array(
@@ -859,7 +875,7 @@ class Fanyi2_AI_Engine {
                     array('role' => 'user', 'content' => $prompt),
                 ),
                 'temperature' => 0.3,
-                'max_tokens'  => 4096,
+                'max_tokens'  => self::get_max_tokens(),
             ));
             $headers = array(
                 'Content-Type: application/json',
@@ -938,7 +954,11 @@ class Fanyi2_AI_Engine {
             do {
                 $status = curl_multi_exec($mh, $running);
                 if ($running > 0) {
-                    curl_multi_select($mh, 1);
+                    // curl_multi_select 在没有可用描述符时会立即返回 -1，
+                    // 不主动让出 CPU 的话整个循环就是 100% 忙等。
+                    if (curl_multi_select($mh, 1) === -1) {
+                        usleep(1000);
+                    }
                 }
             } while ($running > 0 && $status === CURLM_OK);
 

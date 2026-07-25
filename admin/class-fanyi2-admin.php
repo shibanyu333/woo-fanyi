@@ -993,13 +993,29 @@ class Fanyi2_Admin {
                             <tr>
                                 <th>每批翻译数量</th>
                                 <td>
-                                    <input type="number" name="fanyi2_batch_size" 
-                                           value="<?php echo esc_attr(get_option('fanyi2_batch_size', 30)); ?>"
-                                           min="1" max="500">
-                                    <p class="description">每次翻译处理的基础数量，建议 30-150（高配服务器可更高）。</p>
+                                    <input type="number" name="fanyi2_batch_size"
+                                           value="<?php echo esc_attr(get_option('fanyi2_batch_size', 120)); ?>"
+                                           min="50" max="500" step="10">
+                                    <p class="description">每次翻译处理的基础数量，有效范围 50-500，建议 50-150（高配服务器可更高）。</p>
                                 </td>
                             </tr>
                         </table>
+                    </div>
+
+                    <div class="fanyi2-card">
+                        <h2>前台自动收录新文案</h2>
+                        <p>
+                            <label>
+                                <input type="checkbox" name="fanyi2_runtime_capture_enabled" value="1"
+                                       <?php checked(get_option('fanyi2_runtime_capture_enabled', '0'), '1'); ?>>
+                                访客浏览前台时，自动把页面上出现的新文案收录进翻译库
+                            </label>
+                        </p>
+                        <p class="description">
+                            <strong>默认关闭。</strong>开启后每次前台访问都会为页面上的文案执行数据库查询和写入，
+                            流量大的站点会明显变慢。建议仅在需要补收录时临时开启，收录完成后关掉；
+                            日常请使用「整站翻译 &gt; 扫描整个站点」。
+                        </p>
                     </div>
                 </div>
 

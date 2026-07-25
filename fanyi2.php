@@ -146,7 +146,8 @@ final class Fanyi2 {
             'fanyi2_custom_model'      => '',
             'fanyi2_auto_detect_browser' => '1',
             'fanyi2_url_mode' => 'parameter', // parameter or subdirectory
-            'fanyi2_batch_size' => 30,
+            'fanyi2_batch_size' => 120,
+            'fanyi2_runtime_capture_enabled' => '0', // 1=前台访问时自动收录新文案（会增加数据库写入）
             'fanyi2_switcher_position' => 'bottom-right', // bottom-right, bottom-left, top-right, top-left
             'fanyi2_switcher_style' => 'dropdown', // dropdown, flags, minimal
             'fanyi2_switcher_visible' => '1', // 1=show, 0=hide

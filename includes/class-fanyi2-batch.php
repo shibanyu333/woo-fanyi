@@ -891,54 +891,6 @@ class Fanyi2_Batch {
     }
 
     /**
-     * 预翻译所有未翻译的字符串
-     */
-    public static function pretranslate_all($target_language, $batch_size = 10) {
-        $source_language = 'auto';
-        $total_translated = 0;
-        $errors = array();
-
-        while (true) {
-            $untranslated = Fanyi2_Database::get_untranslated_strings($target_language, $batch_size);
-
-            if (empty($untranslated)) {
-                break;
-            }
-
-            $texts = array();
-            foreach ($untranslated as $str) {
-                $texts[$str->id] = $str->original_string;
-            }
-
-            $results = Fanyi2_AI_Engine::translate_batch($texts, $target_language, $source_language);
-
-            if (is_wp_error($results)) {
-                $errors[] = $results->get_error_message();
-                break;
-            }
-
-            foreach ($results as $string_id => $translated) {
-                if (!empty($translated)) {
-                    $saved_id = Fanyi2_Database::save_translation_if_missing($string_id, $target_language, $translated, 'ai');
-                    if ($saved_id) {
-                        $total_translated++;
-                    }
-                }
-            }
-
-            // 防止超时
-            if ($total_translated >= 500) {
-                break;
-            }
-        }
-
-        return array(
-            'translated' => $total_translated,
-            'errors'     => $errors,
-        );
-    }
-
-    /**
      * 注册 WooCommerce 通用界面字符串
      * 这些是购物车、结账、账户页面等常见文本
      */

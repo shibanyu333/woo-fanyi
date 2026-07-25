@@ -51,12 +51,50 @@ class Fanyi2_Frontend {
      * 后台语言必须完全交给 WordPress 用户/站点设置，Fanyi2 只处理前台展示语言。
      */
     public static function is_backend_language_context() {
-        if (is_admin() || wp_doing_ajax()) {
+        // AJAX 需要单独判断：admin-ajax.php 的 REQUEST_URI 永远包含 /wp-admin，
+        // 但 WooCommerce 购物车碎片、wc-ajax 等都是前台请求，必须按前台语言翻译。
+        if (wp_doing_ajax()) {
+            return self::is_admin_originated_ajax();
+        }
+
+        if (is_admin()) {
             return true;
         }
 
         $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) $_SERVER['REQUEST_URI'] : '';
         return (strpos($request_uri, '/wp-admin') !== false || strpos($request_uri, 'wp-login.php') !== false);
+    }
+
+    /**
+     * 当前 AJAX 请求是否来自后台页面
+     */
+    private static function is_admin_originated_ajax() {
+        // wc-ajax 一定是前台（购物车/结账实时刷新）
+        if (isset($_GET['wc-ajax']) || isset($_POST['wc-ajax'])) {
+            return false;
+        }
+
+        $referer = '';
+        if (function_exists('wp_get_referer')) {
+            $candidate = wp_get_referer();
+            if (is_string($candidate)) {
+                $referer = $candidate;
+            }
+        }
+        if ($referer === '' && isset($_SERVER['HTTP_REFERER'])) {
+            $referer = (string) wp_unslash($_SERVER['HTTP_REFERER']);
+        }
+
+        if ($referer === '') {
+            // 拿不到来源时按后台处理：宁可少翻译，也不能把后台界面翻掉
+            return true;
+        }
+
+        // 只比较路径：反向代理下 referer 与 admin_url() 的协议/域名可能不一致
+        $referer_path = (string) wp_parse_url($referer, PHP_URL_PATH);
+        $admin_path   = (string) wp_parse_url(admin_url(), PHP_URL_PATH);
+
+        return ($admin_path !== '' && strpos($referer_path, $admin_path) === 0);
     }
 
     /**
@@ -179,7 +217,7 @@ class Fanyi2_Frontend {
     /**
      * 语言代码映射为 WordPress locale
      */
-    private static function map_language_to_locale($lang) {
+    public static function map_language_to_locale($lang) {
         $locale_map = array(
             'zh' => 'zh_CN',
             'hk' => 'zh_HK',
@@ -214,6 +252,62 @@ class Fanyi2_Frontend {
         );
 
         return isset($locale_map[$lang]) ? $locale_map[$lang] : $lang;
+    }
+
+    /**
+     * 语言代码映射为 BCP-47 标签（用于 html lang / hreflang）
+     *
+     * 直接复用 WordPress locale 表，避免多份不同步的映射：
+     * hk => zh-HK、tw => zh-TW、no => nb-NO 都是合法标签，
+     * 而直接输出 hk / tw 是非法的，搜索引擎会忽略。
+     */
+    public static function get_html_language_tag($lang) {
+        return str_replace('_', '-', self::map_language_to_locale($lang));
+    }
+
+    /**
+     * 当前请求的完整 URL。
+     *
+     * 不能用 home_url(add_query_arg(array()))：add_query_arg(array()) 返回的是
+     * 完整 REQUEST_URI，再交给 home_url() 会把 WordPress 所在子目录拼两次
+     * （site.com/blog => site.com/blog/blog/...）。
+     */
+    public static function get_current_url() {
+        $request_uri = isset($_SERVER['REQUEST_URI']) ? (string) wp_unslash($_SERVER['REQUEST_URI']) : '/';
+        $request_uri = remove_query_arg('fanyi2_editor', $request_uri);
+
+        $home_parts = wp_parse_url(home_url('/'));
+        $scheme = isset($home_parts['scheme']) ? $home_parts['scheme'] : (is_ssl() ? 'https' : 'http');
+        $host   = isset($home_parts['host']) ? $home_parts['host'] : '';
+        if ($host === '') {
+            return home_url('/');
+        }
+
+        $base = $scheme . '://' . $host;
+        if (!empty($home_parts['port'])) {
+            $base .= ':' . $home_parts['port'];
+        }
+
+        return $base . '/' . ltrim($request_uri, '/');
+    }
+
+    /**
+     * 规范化语言路径的尾斜杠。
+     *
+     * 目录形式补尾斜杠，指向具体文件（/sitemap.xml、/post.html）时保持原样，
+     * 否则会变成 /en/sitemap.xml/ 这样的 404 地址。
+     */
+    public static function normalize_language_path($path) {
+        $path = rtrim((string) $path, '/');
+        if ($path === '') {
+            return '/';
+        }
+
+        if (preg_match('#/[^/]+\.[a-z0-9]{1,8}$#i', $path)) {
+            return $path;
+        }
+
+        return $path . '/';
     }
 
     /**
@@ -368,6 +462,16 @@ class Fanyi2_Frontend {
             return;
         }
 
+        // 非 HTML 输出必须原样返回：RSS、核心 sitemap、oEmbed、trackback
+        // 走的都是 template_redirect，被替换/加语言前缀后格式会坏掉。
+        if (is_feed() || is_robots() || is_trackback() || (function_exists('is_embed') && is_embed())) {
+            return;
+        }
+
+        if (get_query_var('sitemap') !== '' || get_query_var('sitemap-stylesheet') !== '') {
+            return;
+        }
+
         // 始终开启输出缓冲：
         // - 非默认语言时执行替换；
         // - 默认语言时执行运行期文本抓取（返回原文，不改显示）。
@@ -383,16 +487,38 @@ class Fanyi2_Frontend {
         }
 
         if (self::$current_language === null) {
-            // 在init之前调用时的处理
-            if (isset($_GET['lang'])) {
-                return sanitize_text_field($_GET['lang']);
-            }
-            if (isset($_COOKIE['fanyi2_language'])) {
-                return sanitize_text_field($_COOKIE['fanyi2_language']);
-            }
-            return get_option('fanyi2_default_language', 'zh');
+            // 在 template_redirect 之前调用时的处理
+            return self::resolve_early_language();
         }
         return self::$current_language;
+    }
+
+    /**
+     * detect_and_set_language() 执行前的语言推断。
+     *
+     * 必须校验语言是否在启用列表内：这个返回值会作为翻译缓存键
+     * （fanyi2_all_xx transient），未校验时 ?lang=任意值 就能往 options
+     * 表里灌任意多条缓存记录。
+     */
+    private static function resolve_early_language() {
+        $enabled = (array) get_option('fanyi2_enabled_languages', array());
+        $default_language = get_option('fanyi2_default_language', 'zh');
+
+        $candidates = array();
+        if (isset($_GET['lang'])) {
+            $candidates[] = sanitize_text_field(wp_unslash($_GET['lang']));
+        }
+        if (isset($_COOKIE['fanyi2_language'])) {
+            $candidates[] = sanitize_text_field(wp_unslash($_COOKIE['fanyi2_language']));
+        }
+
+        foreach ($candidates as $candidate) {
+            if ($candidate !== '' && in_array($candidate, $enabled, true)) {
+                return $candidate;
+            }
+        }
+
+        return $default_language;
     }
 
     /**
@@ -611,21 +737,12 @@ class Fanyi2_Frontend {
      */
     public static function modify_language_attributes($output) {
         $current_lang = self::get_current_language();
-        $locale_map = array(
-            'zh' => 'zh-CN', 'en' => 'en-US', 'ja' => 'ja',
-            'ko' => 'ko', 'fr' => 'fr-FR', 'de' => 'de-DE',
-            'es' => 'es-ES', 'ru' => 'ru-RU', 'ar' => 'ar',
-            'pt' => 'pt-BR', 'it' => 'it-IT', 'th' => 'th',
-            'vi' => 'vi', 'id' => 'id', 'ms' => 'ms',
-            'tr' => 'tr', 'pl' => 'pl', 'nl' => 'nl',
-        );
-
-        $locale = isset($locale_map[$current_lang]) ? $locale_map[$current_lang] : $current_lang;
+        $locale = self::get_html_language_tag($current_lang);
         $output = preg_replace('/lang="[^"]*"/', 'lang="' . esc_attr($locale) . '"', $output);
 
         // RTL语言支持
         $rtl_languages = Fanyi2_IP_Detector::get_rtl_languages();
-        if (in_array($current_lang, $rtl_languages)) {
+        if (in_array($current_lang, $rtl_languages, true) && stripos($output, 'dir=') === false) {
             $output .= ' dir="rtl"';
         }
 
@@ -639,11 +756,12 @@ class Fanyi2_Frontend {
         $enabled_languages = get_option('fanyi2_enabled_languages', array());
         $url_mode = get_option('fanyi2_url_mode', 'parameter');
         $default_lang = get_option('fanyi2_default_language', 'zh');
-        $current_url = home_url(add_query_arg(array()));
+        $current_url = self::get_current_url();
 
         foreach ($enabled_languages as $lang) {
             $lang_url = self::get_language_url($lang, $current_url);
-            $hreflang = ($lang === 'zh') ? 'zh-Hans' : $lang;
+            // hk / tw 直接输出不是合法 BCP-47，必须写成 zh-HK / zh-TW
+            $hreflang = self::get_html_language_tag($lang);
             echo '<link rel="alternate" hreflang="' . esc_attr($hreflang) . '" href="' . esc_url($lang_url) . '" />' . "\n";
         }
         echo '<link rel="alternate" hreflang="x-default" href="' . esc_url(self::get_language_url($default_lang, $current_url)) . '" />' . "\n";
@@ -654,7 +772,7 @@ class Fanyi2_Frontend {
      */
     public static function get_language_url($lang, $base_url = '') {
         if (empty($base_url)) {
-            $base_url = home_url(add_query_arg(array()));
+            $base_url = self::get_current_url();
         }
 
         $url_mode = get_option('fanyi2_url_mode', 'parameter');
@@ -692,7 +810,7 @@ class Fanyi2_Frontend {
             if (isset($parsed['port'])) {
                 $new_url .= ':' . $parsed['port'];
             }
-            $new_url .= rtrim($new_path, '/') . '/';
+            $new_url .= self::normalize_language_path($new_path);
             if (isset($parsed['query'])) {
                 // 移除 lang 参数
                 parse_str($parsed['query'], $query_params);
@@ -991,7 +1109,7 @@ class Fanyi2_Frontend {
         $default_lang = get_option('fanyi2_default_language', 'zh');
 
         // 构建子菜单项（使用当前页面 URL 作为基准，而非首页）
-        $current_page_url = home_url(add_query_arg(array()));
+        $current_page_url = self::get_current_url();
         $submenu_items = '';
         foreach ($enabled_languages as $lang) {
             $lang_name = isset($language_names[$lang]) ? $language_names[$lang] : $lang;

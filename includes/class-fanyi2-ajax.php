@@ -2705,6 +2705,7 @@ class Fanyi2_Ajax {
             'fanyi2_custom_api_url',
             'fanyi2_custom_model',
             'fanyi2_auto_detect_browser',
+            'fanyi2_runtime_capture_enabled',
             'fanyi2_url_mode',
             'fanyi2_batch_size',
             'fanyi2_switcher_position',
