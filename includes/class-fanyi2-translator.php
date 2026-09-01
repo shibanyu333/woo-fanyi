@@ -1437,6 +1437,9 @@ class Fanyi2_Translator {
             return true;
         }
 
+        // 还原 HTML 实体后的形态，下面几处判断都以它为准（原因见文末「代码字符占比」一段）
+        $probe = html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
         if (preg_match('/(?:admin-bar-inline-css|wpadminbar|sourceURL=)/i', $text)) {
             return true;
         }
@@ -1449,7 +1452,9 @@ class Fanyi2_Translator {
             return true;
         }
 
-        if (preg_match('/<\s*\/?\s*(script|style|noscript|template)\b/i', $text)) {
+        // 原文与还原后都查一遍：被转义成 &lt;script&gt; 的注入同样要拦下
+        if (preg_match('/<\s*\/?\s*(script|style|noscript|template)\b/i', $text)
+            || preg_match('/<\s*\/?\s*(script|style|noscript|template)\b/i', $probe)) {
             return true;
         }
 
@@ -1459,10 +1464,23 @@ class Fanyi2_Translator {
             return true;
         }
 
-        $length = mb_strlen($text);
-        if ($length > 0) {
-            $code_chars = preg_match_all('/[{};<>=$#]/u', $text, $tmp);
-            if ($code_chars > 0 && ($code_chars / $length) > 0.08 && preg_match('/[:;{}]/', $text)) {
+        // 「代码字符占比」启发式：CSS/JS 噪声里 {};<>=$# 这些符号密度远高于正常文案。
+        //
+        // 统计前必须先把 HTML 实体还原成字符。实体本身会凭空贡献代码字符：
+        // 一个 &#039;（撇号）就带来 # 和 ; 两个，&#038;（&）同理。于是
+        // "Shop today&#039;s drop" 这种 21 字符的按钮文案算出 2/21 = 9.5%，
+        // 越过 8% 阈值被整条判成代码丢弃 —— 它连提取阶段都进不去，
+        // 后台再怎么登记译文都不会被替换，且因为只差零点几个百分点，
+        // 同一句话长一点就正常、短一点就消失，非常难排查。
+        // 实测受影响的是所有含撇号或 & 的短文案（按钮、菜单项、小标题）。
+        //
+        // 还原后再统计，判断的是文本真正的字符构成：&#039; 变回 '（非代码字符），
+        // 而真正的 CSS/JS 噪声在文本节点里本来就是字面量，不受影响；
+        // 被实体转义过的 &lt;script&gt; 还原成 <script> 后照样会被识别出来。
+        $probe_length = mb_strlen($probe);
+        if ($probe_length > 0) {
+            $code_chars = preg_match_all('/[{};<>=$#]/u', $probe, $tmp);
+            if ($code_chars > 0 && ($code_chars / $probe_length) > 0.08 && preg_match('/[:;{}]/', $probe)) {
                 return true;
             }
         }
