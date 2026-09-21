@@ -3,7 +3,7 @@
  * Plugin Name: Fanyi2 - AI 智能翻译
  * Plugin URI: https://github.com/fanyi2
  * Description: 类似TranslatePress的WordPress多语言翻译插件，支持前端可视化翻译、DeepSeek/千问AI翻译、浏览器语言自动切换、兼容woo-huilv汇率插件
- * Version: 9.3.2
+ * Version: 9.3.3
  * Author: Fanyi2
  * Author URI: https://github.com/fanyi2
  * License: GPL v2 or later
@@ -21,7 +21,7 @@ if (!defined('ABSPATH')) {
 }
 
 // 插件常量
-define('FANYI2_VERSION', '9.3.2');
+define('FANYI2_VERSION', '9.3.3');
 define('FANYI2_PLUGIN_DIR', plugin_dir_path(__FILE__));
 define('FANYI2_PLUGIN_URL', plugin_dir_url(__FILE__));
 define('FANYI2_PLUGIN_BASENAME', plugin_basename(__FILE__));
@@ -95,6 +95,12 @@ final class Fanyi2 {
         add_action('plugins_loaded', array($this, 'on_plugins_loaded'));
         add_action('init', array($this, 'init'));
         add_action('wp_enqueue_scripts', array($this, 'enqueue_frontend_assets'));
+
+        // 外部内容接入：可视化编辑器这类插件直接往前台 HTML 里写文案，
+        // 数据库扫描看不到它们，必须由对方主动登记原文。
+        // do_action('fanyi2_register_strings', $texts, array('page_url' => $url));
+        add_action('fanyi2_register_strings', array('Fanyi2_Batch', 'handle_register_strings'), 10, 2);
+        add_action('fanyi2_translate_external_strings', array('Fanyi2_Batch', 'translate_external_strings'), 10, 1);
     }
 
     /**
@@ -112,6 +118,10 @@ final class Fanyi2 {
     public function deactivate() {
         if (class_exists('Fanyi2_Ajax') && method_exists('Fanyi2_Ajax', 'clear_background_translation_jobs')) {
             Fanyi2_Ajax::clear_background_translation_jobs();
+        }
+        // 外部文案的待翻译任务带参数，wp_clear_scheduled_hook() 清不掉带参数的事件。
+        if (function_exists('wp_unschedule_hook')) {
+            wp_unschedule_hook('fanyi2_translate_external_strings');
         }
         flush_rewrite_rules();
     }

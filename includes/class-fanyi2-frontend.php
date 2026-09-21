@@ -46,6 +46,26 @@ class Fanyi2_Frontend {
     }
 
     /**
+     * 本次请求是否强制按默认语言渲染。
+     *
+     * 给外部「所见即所得」编辑器用：这类编辑器保存的是页面覆盖层文案，
+     * 按路径存一份、各语言共用，在译文页面上编辑等于把译文当原文写进库，
+     * 之后所有语言都会跟着错。编辑态必须先看到未翻译的原文。
+     *
+     * 用法：add_filter('fanyi2_force_default_language', '__return_true');
+     * 过滤器要在 init 之前挂好（插件加载期即可），结果按请求缓存。
+     */
+    public static function should_force_default_language() {
+        static $forced = null;
+
+        if ($forced === null) {
+            $forced = (bool) apply_filters('fanyi2_force_default_language', false);
+        }
+
+        return $forced;
+    }
+
+    /**
      * 是否为后台语言上下文。
      *
      * 后台语言必须完全交给 WordPress 用户/站点设置，Fanyi2 只处理前台展示语言。
@@ -323,6 +343,13 @@ class Fanyi2_Frontend {
         $language = null;
         $url_mode = get_option('fanyi2_url_mode', 'parameter');
         $default_lang = get_option('fanyi2_default_language', 'zh');
+
+        // 编辑态：锁死默认语言。这里提前返回是刻意的 —— 既不能跳转到语言子目录，
+        // 也不能改写 cookie，否则管理员退出编辑器后浏览语言会被改掉。
+        if (self::should_force_default_language()) {
+            self::$current_language = $default_lang;
+            return;
+        }
         $enabled = get_option('fanyi2_enabled_languages', array('zh', 'en'));
         $manual_lang = isset($_COOKIE['fanyi2_manual_lang']) ? sanitize_text_field($_COOKIE['fanyi2_manual_lang']) : '';
         $manual_valid = ($manual_lang !== '' && in_array($manual_lang, $enabled, true));
@@ -462,6 +489,12 @@ class Fanyi2_Frontend {
             return;
         }
 
+        // 外部编辑器锁定默认语言时同样不开缓冲：省掉一次整页替换，
+        // 也保证编辑器读到的 DOM 与保存回来的文案完全一致。
+        if (self::should_force_default_language()) {
+            return;
+        }
+
         // 非 HTML 输出必须原样返回：RSS、核心 sitemap、oEmbed、trackback
         // 走的都是 template_redirect，被替换/加语言前缀后格式会坏掉。
         if (is_feed() || is_robots() || is_trackback() || (function_exists('is_embed') && is_embed())) {
@@ -482,6 +515,10 @@ class Fanyi2_Frontend {
      * 获取当前语言
      */
     public static function get_current_language() {
+        if (self::should_force_default_language()) {
+            return get_option('fanyi2_default_language', 'zh');
+        }
+
         if (self::is_backend_language_context()) {
             return get_option('fanyi2_default_language', 'zh');
         }

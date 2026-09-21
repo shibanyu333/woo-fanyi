@@ -639,8 +639,26 @@ class Fanyi2_Batch {
      * 从文本中拆分可翻译片段并入库
      */
     private static function register_segments_from_string($text, $element_type, $page_url, $domain) {
+        $count = 0;
+
+        foreach (self::collect_segments_from_string($text) as $part) {
+            $count += self::register_single_string($part, $element_type, $page_url, $domain);
+        }
+
+        return $count;
+    }
+
+    /**
+     * 把一段内容切成可登记的句子片段（不写库）。
+     *
+     * 登记和「登记完排队翻译」要用同一份切分结果，否则排队的文案与库里
+     * 的原文对不上，翻出来的译文在渲染时永远命中不了。
+     *
+     * @return string[] 去重后的片段。
+     */
+    private static function collect_segments_from_string($text) {
         if (!is_string($text) || trim($text) === '') {
-            return 0;
+            return array();
         }
 
         $text = preg_replace('/<\s*(script|style|noscript|template)\b[^>]*>.*?<\s*\/\s*\1\s*>/is', ' ', (string) $text);
@@ -653,7 +671,7 @@ class Fanyi2_Batch {
         $text = trim((string) $text);
 
         if ($text === '') {
-            return 0;
+            return array();
         }
 
         $parts = preg_split('/[\r\n]+|(?<=[。！？!?；;])\s+/u', $text);
@@ -661,7 +679,7 @@ class Fanyi2_Batch {
             $parts = array($text);
         }
 
-        $count = 0;
+        $segments = array();
         $seen = array();
         foreach ($parts as $part) {
             $part = trim((string) $part);
@@ -686,10 +704,10 @@ class Fanyi2_Batch {
                 continue;
             }
             $seen[$hash] = true;
-            $count += self::register_single_string($part, $element_type, $page_url, $domain);
+            $segments[] = $part;
         }
 
-        return $count;
+        return $segments;
     }
 
     /**
@@ -1096,5 +1114,174 @@ class Fanyi2_Batch {
         }
 
         return $count;
+    }
+
+    // ====== 外部内容（可视化编辑器等）接入 ======
+
+    /**
+     * 登记外部插件直接写进前台 HTML 的文案。
+     *
+     * 这类文案不在 post_content / 菜单 / term / 主题设置里，
+     * scan_database_content() 永远扫不到；不登记就没有原文记录，
+     * 访客切到其它语言时只能看到默认语言的原文。
+     *
+     * @param string|array $texts 纯文本或含行内标签的富文本。
+     * @param array        $args  element_type / page_url / domain。
+     * @return int 登记条数。
+     */
+    public static function register_external_strings($texts, $args = array()) {
+        $args = wp_parse_args($args, array(
+            'element_type' => 'external',
+            'page_url'     => '',
+            'domain'       => 'general',
+        ));
+
+        $count = 0;
+        foreach (self::collect_external_strings($texts) as $text) {
+            $count += self::register_single_string($text, $args['element_type'], $args['page_url'], $args['domain']);
+        }
+
+        return $count;
+    }
+
+    /**
+     * 外部文案 → 可登记的原文列表。
+     *
+     * 每条同时产出两种形态，对应渲染时的两条替换通道：
+     * 1. 去标签后的整条纯文本 —— translate_block_elements() 用它当 key；
+     * 2. 切句后的片段 —— 文本节点逐条替换用它当 key。
+     *
+     * @return string[] 去重后的原文。
+     */
+    private static function collect_external_strings($texts) {
+        if (is_string($texts)) {
+            $texts = array($texts);
+        }
+        if (!is_array($texts) || empty($texts)) {
+            return array();
+        }
+
+        $collected = array();
+        foreach ($texts as $text) {
+            if (!is_string($text) || trim($text) === '') {
+                continue;
+            }
+
+            $plain = wp_strip_all_tags(html_entity_decode($text, ENT_QUOTES | ENT_HTML5, 'UTF-8'));
+            $plain = trim((string) preg_replace('/\s+/u', ' ', $plain));
+            if ($plain !== '' && mb_strlen($plain) >= 2 && mb_strlen($plain) <= 1000
+                && preg_match('/[\p{L}]/u', $plain) && !self::should_skip_scan_text($plain)) {
+                $collected[md5($plain)] = $plain;
+            }
+
+            foreach (self::collect_segments_from_string($text) as $segment) {
+                $collected[md5($segment)] = $segment;
+            }
+        }
+
+        return array_values($collected);
+    }
+
+    /**
+     * 外部插件的统一入口：登记 + 排队翻译。
+     *
+     * 其它插件不必依赖类名，直接：
+     * do_action('fanyi2_register_strings', $texts, array('page_url' => $url));
+     */
+    public static function handle_register_strings($texts, $args = array()) {
+        $registered = self::register_external_strings($texts, $args);
+        self::queue_external_translation($texts);
+
+        return $registered;
+    }
+
+    /**
+     * 把外部文案排进一次性 cron 翻译。
+     *
+     * 不在当前请求里直接调 AI：保存动作要立刻返回，几种语言串行请求
+     * AI 接口会把编辑器的保存按钮卡死十几秒。
+     */
+    public static function queue_external_translation($texts) {
+        $pending = self::collect_external_strings($texts);
+        if (empty($pending)) {
+            return false;
+        }
+
+        // 单次 cron 参数别太大：wp_options 里存的是序列化数组。
+        foreach (array_chunk($pending, 40) as $index => $chunk) {
+            wp_schedule_single_event(time() + 10 + $index, 'fanyi2_translate_external_strings', array($chunk));
+        }
+
+        return true;
+    }
+
+    /**
+     * cron 回调：给外部文案补齐各语言译文。
+     */
+    public static function translate_external_strings($texts) {
+        if (!is_array($texts) || empty($texts)) {
+            return 0;
+        }
+
+        $default_language = (string) get_option('fanyi2_default_language', 'zh');
+        $enabled = (array) get_option('fanyi2_enabled_languages', array());
+        $saved = 0;
+
+        foreach ($enabled as $language) {
+            $language = sanitize_key((string) $language);
+            if ($language === '' || $language === $default_language) {
+                continue;
+            }
+
+            $missing_texts = array();
+            $missing_ids = array();
+
+            foreach ($texts as $text) {
+                $string = Fanyi2_Database::get_or_create_string($text, array(
+                    'domain'       => 'general',
+                    'element_type' => 'external',
+                ));
+                if (!$string || Fanyi2_Database::has_published_translation($string->id, $language)) {
+                    continue;
+                }
+                $missing_texts[] = $text;
+                $missing_ids[] = (int) $string->id;
+            }
+
+            if (empty($missing_texts)) {
+                continue;
+            }
+
+            $language_saved = 0;
+            foreach (array_chunk($missing_texts, 20, true) as $chunk) {
+                $result = Fanyi2_AI_Engine::translate_batch(array_values($chunk), $language, $default_language);
+                if (is_wp_error($result) || !is_array($result)) {
+                    // 这一语言先放过，下次编辑保存或后台批量翻译会再碰到这些原文。
+                    break;
+                }
+
+                $positions = array_keys($chunk);
+                foreach (array_values($result) as $offset => $translated) {
+                    if (!isset($positions[$offset], $missing_ids[$positions[$offset]])) {
+                        continue;
+                    }
+                    $translated = is_string($translated) ? trim($translated) : '';
+                    if ($translated === '' || $translated === $missing_texts[$positions[$offset]]) {
+                        continue;
+                    }
+                    if (Fanyi2_Database::save_translation_if_missing($missing_ids[$positions[$offset]], $language, $translated, 'ai')) {
+                        $language_saved++;
+                    }
+                }
+            }
+
+            if ($language_saved > 0) {
+                // 译文缓存是整语言一个 transient，不清掉前台还是旧的。
+                Fanyi2_Translator::clear_translation_cache($language);
+                $saved += $language_saved;
+            }
+        }
+
+        return $saved;
     }
 }
